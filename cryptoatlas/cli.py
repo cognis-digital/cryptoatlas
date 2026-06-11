@@ -15,6 +15,7 @@ from cryptoatlas.core import (
     query,
     source_catalog,
     stats,
+    verify,
 )
 
 
@@ -46,9 +47,13 @@ def _build_parser() -> argparse.ArgumentParser:
     q.add_argument("--limit", type=int, default=100)
     q.add_argument("--json", action="store_true", help="Emit as JSON.")
 
-    ex = sub.add_parser("export", help="Export the dataset (json or csv).")
-    ex.add_argument("--format", choices=("json", "csv"), default="json")
+    ex = sub.add_parser("export", help="Export the dataset (json, csv, or graphml).")
+    ex.add_argument("--format", choices=("json", "csv", "graphml"), default="json")
     ex.add_argument("--out", help="Write to this file instead of stdout.")
+
+    v = sub.add_parser("verify", help="Verify every record has a valid http(s) "
+                                      "source and a well-formed address.")
+    v.add_argument("--json", action="store_true", help="Emit the report as JSON.")
 
     sub.add_parser("sources", help="List the public source catalog.")
 
@@ -132,6 +137,24 @@ def _run_export(args) -> int:
     return 0
 
 
+def _run_verify(args) -> int:
+    report = verify(args.db)
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0 if report["ok"] else 1
+    print(f"{TOOL_NAME} verify — {report['passed']}/{report['total']} records OK")
+    print("=" * 60)
+    if report["ok"]:
+        print("PASS: every record has a valid http(s) source and a well-formed address.")
+        return 0
+    print(f"FAIL: {len(report['failed'])} record(s) have problems:")
+    for f in report["failed"][:50]:
+        print(f"  [{f['entity_name']}] {f['address'] or '(no address)'}")
+        for r in f["reasons"]:
+            print(f"      - {r}")
+    return 1
+
+
 def _run_sources() -> int:
     cat = source_catalog()
     print(f"{TOOL_NAME} public source catalog — {len(cat)} sources")
@@ -155,6 +178,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return _run_query(args)
     if args.command == "export":
         return _run_export(args)
+    if args.command == "verify":
+        return _run_verify(args)
     if args.command == "sources":
         return _run_sources()
     if args.command == "mcp":

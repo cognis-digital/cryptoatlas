@@ -592,6 +592,8 @@ def export(fmt: str, db_path: str = DEFAULT_DB, out: Optional[str] = None) -> st
         for r in rows:
             w.writerow({k: r.get(k, "") for k in fields})
         text = buf.getvalue()
+    elif fmt == "graphml":
+        text = records_to_graphml(rows)
     else:
         raise ValueError(f"unknown export format: {fmt!r}")
 
@@ -599,6 +601,111 @@ def export(fmt: str, db_path: str = DEFAULT_DB, out: Optional[str] = None) -> st
         with open(out, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
     return text
+
+
+# ---------------------------------------------------------------------------
+# Integrity verification + graph export
+# (verify_records / records_to_graphml drafted by the local fleet, corrected
+#  and verified here: fixed the SOL base58 check and the GraphML structure.)
+# ---------------------------------------------------------------------------
+
+_RE_BTC_B58 = re.compile(r"^[13][1-9A-HJ-NP-Za-km-z]{25,39}$")
+_RE_BTC_BECH32 = re.compile(r"^bc1[0-9ac-hj-np-z]{8,87}$")
+_RE_EVM = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_RE_TRON = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
+_RE_B58 = re.compile(r"^[1-9A-HJ-NP-Za-km-z]+$")
+
+
+def _address_ok(address: str, chain: str) -> bool:
+    """Heuristic per-chain address validation. Empty address is allowed
+    (entity-level rows). Unknown chains are not failed."""
+    a = (address or "").strip()
+    c = (chain or "").strip().lower()
+    if not a:
+        return True
+    if c == "btc":
+        return bool(_RE_BTC_B58.match(a) or _RE_BTC_BECH32.match(a))
+    if c in ("eth", "bsc"):
+        return bool(_RE_EVM.match(a))
+    if c == "tron":
+        return bool(_RE_TRON.match(a))
+    if c == "sol":
+        return bool(_RE_B58.match(a)) and 32 <= len(a) <= 44
+    return True
+
+
+def verify_records(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    """Check every record has an http(s) source_url and a well-formed address
+    for its chain. Returns a structured pass/fail report."""
+    rows = list(rows)
+    failed: List[Dict[str, Any]] = []
+    for r in rows:
+        reasons: List[str] = []
+        src = (r.get("source_url") or "").strip()
+        if not (src.startswith("http://") or src.startswith("https://")):
+            reasons.append("source_url missing or not http(s)")
+        if not _address_ok(r.get("address", ""), r.get("chain", "")):
+            reasons.append(f"malformed {r.get('chain') or '?'} address")
+        if reasons:
+            failed.append({"entity_name": r.get("entity_name"),
+                           "address": r.get("address"), "reasons": reasons})
+    total = len(rows)
+    return {"ok": not failed, "total": total,
+            "passed": total - len(failed), "failed": failed}
+
+
+def verify(db_path: str = DEFAULT_DB) -> Dict[str, Any]:
+    """Load the dataset and verify every record's source + address."""
+    conn = connect(db_path)
+    try:
+        rows = [dict(r) for r in conn.execute("SELECT * FROM records")]
+    finally:
+        conn.close()
+    return verify_records(rows)
+
+
+def records_to_graphml(rows: Iterable[Dict[str, Any]]) -> str:
+    """Render entities + their addresses as a valid GraphML graph: one node per
+    entity, one per distinct address, a directed edge entity -> address."""
+    from xml.sax.saxutils import escape, quoteattr
+    ents: Dict[str, str] = {}
+    addrs: Dict[str, str] = {}
+    edges: List[Tuple[str, str]] = []
+    for r in rows:
+        name = (r.get("entity_name") or "").strip()
+        addr = (r.get("address") or "").strip()
+        if name:
+            ents.setdefault(name, r.get("entity_type") or "")
+        if addr:
+            addrs.setdefault(addr, r.get("chain") or "")
+            if name:
+                edges.append((name, addr))
+    out: List[str] = ['<?xml version="1.0" encoding="UTF-8"?>',
+                      '<graphml xmlns="http://graphml.graphdrawing.org/xmlns">']
+    for kid, attr in (("d0", "label"), ("d1", "kind"), ("d2", "type"), ("d3", "chain")):
+        out.append(f'  <key id="{kid}" for="node" attr.name="{attr}" attr.type="string"/>')
+    out.append('  <graph edgedefault="directed">')
+
+    def _node(nid: str, label: str, kind: str, type_: str = "", chain: str = "") -> None:
+        out.append(f"    <node id={quoteattr(nid)}>")
+        out.append(f'      <data key="d0">{escape(label)}</data>')
+        out.append(f'      <data key="d1">{escape(kind)}</data>')
+        if type_:
+            out.append(f'      <data key="d2">{escape(type_)}</data>')
+        if chain:
+            out.append(f'      <data key="d3">{escape(chain)}</data>')
+        out.append("    </node>")
+
+    for name, typ in sorted(ents.items()):
+        _node("ent:" + name, name, "entity", type_=typ)
+    for addr, chain in sorted(addrs.items()):
+        _node("addr:" + addr, addr, "address", chain=chain)
+    for i, (name, addr) in enumerate(edges):
+        out.append(f'    <edge id="e{i}" source={quoteattr("ent:" + name)} '
+                   f"target={quoteattr('addr:' + addr)}/>")
+    out.append("  </graph>")
+    out.append("</graphml>")
+    return "\n".join(out) + "\n"
 
 
 def source_catalog() -> List[Dict[str, str]]:
