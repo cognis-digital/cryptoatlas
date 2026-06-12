@@ -58,6 +58,7 @@ CHAINS = (
     "bitcoin-cash", "ripple", "polygon", "arbitrum", "multi",
     "bsc", "optimism", "base", "avalanche", "fantom", "gnosis",
     "ethereum-classic", "monero", "zcash", "dash", "verge",
+    "zksync", "cronos", "blast",
 )
 
 
@@ -347,6 +348,36 @@ SOURCE_CATALOG: List[Dict[str, str]] = [
         "url": "https://github.com/etherscan-labels/etherscan-labels",
         "type": "bridge",
         "notes": "Labeled bridge/protocol contract addresses from public label sets.",
+    },
+    {
+        "id": "multichain_explorer_labels",
+        "name": "Multi-chain block-explorer public labels (BSC/Polygon/Arbitrum/"
+                "Optimism/Fantom/Avalanche)",
+        "url": "https://github.com/brianleect/etherscan-labels",
+        "type": "service",
+        "notes": "Public per-chain combinedAllLabels.json exports for BscScan, "
+                 "PolygonScan, Arbiscan, Optimism, FTMScan and Avalanche. Each "
+                 "address carries a PUBLIC explorer entity/protocol/contract "
+                 "label; address->entity mapping only, no private PII.",
+    },
+    {
+        "id": "coingecko_token_lists",
+        "name": "CoinGecko per-platform token lists",
+        "url": "https://tokens.coingecko.com/uniswap/all.json",
+        "type": "token",
+        "notes": "CoinGecko publishes a Uniswap-schema token list per chain "
+                 "platform (Ethereum/Polygon/BSC/Arbitrum/Optimism/Avalanche/"
+                 "Base/Fantom/Gnosis). Token-contract -> issuer/project labels.",
+    },
+    {
+        "id": "defillama_protocols",
+        "name": "DefiLlama public protocol registry",
+        "url": "https://api.llama.fi/protocols",
+        "type": "protocol",
+        "notes": "DefiLlama's public protocol list; each protocol's on-chain "
+                 "governance/token/bridge contract address is mapped to its "
+                 "entity name + category (DeFi protocol, CEX, bridge). "
+                 "Entity/contract-level only, no private PII.",
     },
 ]
 
@@ -674,16 +705,14 @@ def _classify_label(name: str, labels: List[str]) -> Tuple[str, str]:
     return "contract", "labeled-cluster"
 
 
-def fetch_etherscan_labels(timeout: float = 30.0,
-                           cap: int = 60_000) -> List[Record]:
-    """Pull the public Etherscan combined-labels set (~30k labeled addresses).
+def _parse_scan_labels(data: Any, chain: str, source_id: str, url: str,
+                       cap: int) -> List[Record]:
+    """Parse a brianleect ``combinedAllLabels.json`` blob into Records.
 
-    Each address carries a PUBLIC entity/protocol/contract label. Address->entity
-    mapping only — no private-individual PII. Returns [] if unreachable.
+    The file is a dict ``{address: {name, labels: [...]}}``. Each address carries
+    a PUBLIC explorer entity/protocol/contract label — address->entity mapping
+    only, no private-individual PII.
     """
-    url = ("https://raw.githubusercontent.com/brianleect/etherscan-labels/"
-           "main/data/etherscan/combined/combinedAllLabels.json")
-    data = _http_get_json(url, timeout=timeout)
     if not isinstance(data, dict):
         return []
     out: List[Record] = []
@@ -701,12 +730,55 @@ def fetch_etherscan_labels(timeout: float = 30.0,
             continue
         etype, cat = _classify_label(name, labels if isinstance(labels, list) else [])
         out.append(Record(
-            address=a, chain="ethereum", entity_name=name,
+            address=a, chain=chain, entity_name=name,
             entity_type=etype, category=cat,
-            label_source="etherscan_labels", source_url=url,
-            notes="Public Etherscan label" + (
+            label_source=source_id, source_url=url,
+            notes="Public explorer label" + (
                 f" [{', '.join(labels[:4])}]" if labels else ""),
         ))
+        if len(out) >= cap:
+            break
+    return out
+
+
+def fetch_etherscan_labels(timeout: float = 30.0,
+                           cap: int = 60_000) -> List[Record]:
+    """Pull the public Etherscan combined-labels set (~30k labeled addresses).
+
+    Each address carries a PUBLIC entity/protocol/contract label. Address->entity
+    mapping only — no private-individual PII. Returns [] if unreachable.
+    """
+    url = ("https://raw.githubusercontent.com/brianleect/etherscan-labels/"
+           "main/data/etherscan/combined/combinedAllLabels.json")
+    data = _http_get_json(url, timeout=timeout)
+    return _parse_scan_labels(data, "ethereum", "etherscan_labels", url, cap)
+
+
+# brianleect ships the same combinedAllLabels.json layout for several other EVM
+# explorers. Map each public per-chain file to its cryptoatlas chain.
+_MULTICHAIN_LABEL_DIRS = {
+    "bscscan": "bsc", "polygonscan": "polygon", "arbiscan": "arbitrum",
+    "optimism": "optimism", "ftmscan": "fantom", "avalanche": "avalanche",
+}
+
+
+def fetch_multichain_explorer_labels(timeout: float = 30.0,
+                                     cap: int = 80_000) -> List[Record]:
+    """Pull public per-chain explorer label sets (BSC/Polygon/Arbitrum/Optimism/
+    Fantom/Avalanche) from the same public ``etherscan-labels`` repo.
+
+    Each address carries a PUBLIC explorer entity/protocol/contract label.
+    Returns [] if all sources unreachable; skips any individual dead file.
+    """
+    base = ("https://raw.githubusercontent.com/brianleect/etherscan-labels/"
+            "main/data/{dir}/combined/combinedAllLabels.json")
+    out: List[Record] = []
+    for dir_name, chain in _MULTICHAIN_LABEL_DIRS.items():
+        url = base.format(dir=dir_name)
+        data = _http_get_json(url, timeout=timeout)
+        recs = _parse_scan_labels(data, chain, "multichain_explorer_labels",
+                                  url, cap - len(out))
+        out.extend(recs)
         if len(out) >= cap:
             break
     return out
@@ -716,7 +788,7 @@ def fetch_etherscan_labels(timeout: float = 30.0,
 _EVM_CHAIN_BY_ID = {
     1: "ethereum", 10: "optimism", 56: "bsc", 137: "polygon",
     250: "fantom", 8453: "base", 42161: "arbitrum", 43114: "avalanche",
-    100: "gnosis",
+    100: "gnosis", 324: "zksync", 25: "cronos", 81457: "blast",
 }
 
 
@@ -802,14 +874,128 @@ def fetch_trustwallet_tokens(timeout: float = 25.0,
     return out
 
 
+# CoinGecko publishes a token list per chain platform (Uniswap-token-list JSON
+# schema). slug -> cryptoatlas chain.
+_COINGECKO_PLATFORMS = {
+    "uniswap": "ethereum", "polygon-pos": "polygon",
+    "binance-smart-chain": "bsc", "arbitrum-one": "arbitrum",
+    "optimistic-ethereum": "optimism", "avalanche": "avalanche",
+    "base": "base", "fantom": "fantom", "xdai": "gnosis",
+}
+
+
+def fetch_coingecko_token_lists(timeout: float = 30.0,
+                                cap: int = 60_000) -> List[Record]:
+    """Pull CoinGecko per-platform token lists (issuer-labeled contracts).
+
+    Each platform list follows the Uniswap token-list schema
+    (``{"tokens": [{chainId, address, name, symbol}, ...]}``). Token-contract
+    -> issuer/project mapping only; entity/contract-level, no private PII.
+    """
+    out: List[Record] = []
+    for slug, chain in _COINGECKO_PLATFORMS.items():
+        url = f"https://tokens.coingecko.com/{slug}/all.json"
+        data = _http_get_json(url, timeout=timeout)
+        toks = data.get("tokens") if isinstance(data, dict) else None
+        if not isinstance(toks, list):
+            continue
+        out.extend(_ingest_token_list(toks, "coingecko_token_lists", url, chain,
+                                      cap - len(out)))
+        if len(out) >= cap:
+            break
+    return out
+
+
+# DefiLlama protocol ``address`` values are either a bare EVM/Solana address or
+# a ``<chain>:<address>`` pair. Map DefiLlama chain slugs to cryptoatlas chains.
+_DEFILLAMA_CHAINS = {
+    "ethereum": "ethereum", "bsc": "bsc", "binance": "bsc",
+    "polygon": "polygon", "arbitrum": "arbitrum", "optimism": "optimism",
+    "base": "base", "avax": "avalanche", "avalanche": "avalanche",
+    "fantom": "fantom", "xdai": "gnosis", "gnosis": "gnosis",
+    "era": "zksync", "zksync": "zksync", "cronos": "cronos",
+    "blast": "blast", "solana": "solana", "tron": "tron",
+}
+# DefiLlama category -> (entity_type, category). Defaults to protocol/defi.
+_DEFILLAMA_CAT = {
+    "cex": ("exchange", "cex"),
+    "bridge": ("bridge", "bridge-contract"),
+}
+
+
+def _defillama_chain_addr(raw_addr: str) -> Tuple[str, str]:
+    """Split a DefiLlama address into (chain, normalized_address).
+
+    Returns ('', '') if the chain is unknown or the address is not an
+    unambiguous on-chain identifier we can verify.
+    """
+    s = (raw_addr or "").strip()
+    if ":" in s:
+        slug, _, addr = s.partition(":")
+        chain = _DEFILLAMA_CHAINS.get(slug.strip().lower(), "")
+    else:
+        addr, chain = s, "ethereum"  # bare DefiLlama addresses are EVM
+    addr = addr.strip()
+    if not chain:
+        return "", ""
+    al = addr.lower()
+    if al.startswith("0x") and len(al) == 42:
+        return chain if chain in CHAINS else "ethereum", al
+    if chain == "solana" and _RE_B58.match(addr) and 32 <= len(addr) <= 44:
+        return "solana", addr
+    if chain == "tron" and _RE_TRON.match(addr):
+        return "tron", addr
+    return "", ""
+
+
+def fetch_defillama_protocols(timeout: float = 30.0,
+                              cap: int = 30_000) -> List[Record]:
+    """Pull DefiLlama's public protocol registry (entity-level contract labels).
+
+    Each protocol carries a public on-chain ``address`` (token/governance/bridge
+    contract) plus a name + category. Entity/contract-level only; no private PII.
+    Protocols without a parseable on-chain address are skipped.
+    """
+    data = _http_get_json("https://api.llama.fi/protocols", timeout=timeout)
+    if not isinstance(data, list):
+        return []
+    out: List[Record] = []
+    for p in data:
+        if not isinstance(p, dict):
+            continue
+        chain, addr = _defillama_chain_addr(p.get("address") or "")
+        if not addr:
+            continue
+        name = (p.get("name") or "").strip()
+        if not name:
+            continue
+        cat_raw = (p.get("category") or "").strip().lower()
+        etype, cat = _DEFILLAMA_CAT.get(cat_raw, ("protocol", "defi-protocol"))
+        out.append(Record(
+            address=addr, chain=chain, entity_name=name,
+            entity_type=etype, category=cat,
+            label_source="defillama_protocols",
+            source_url="https://api.llama.fi/protocols",
+            balance_hint=(p.get("symbol") or ""),
+            notes=f"DefiLlama protocol ({p.get('category') or 'DeFi'}); "
+                  "public on-chain contract label.",
+        ))
+        if len(out) >= cap:
+            break
+    return out
+
+
 # Registry of live scale-fetchers. Each returns a list of Records (never raises).
 LIVE_FETCHERS = (
     ("ofac_sdn_crypto", fetch_ofac_sdn),
     ("ofac_sdn_mirror", fetch_ofac_sdn_mirror),
     ("etherscan_labels", fetch_etherscan_labels),
+    ("multichain_explorer_labels", fetch_multichain_explorer_labels),
     ("uniswap_token_list", fetch_uniswap_token_list),
     ("oneinch_token_lists", fetch_oneinch_token_lists),
     ("trustwallet_assets", fetch_trustwallet_tokens),
+    ("coingecko_token_lists", fetch_coingecko_token_lists),
+    ("defillama_protocols", fetch_defillama_protocols),
 )
 
 
@@ -990,7 +1176,8 @@ _RE_B58 = re.compile(r"^[1-9A-HJ-NP-Za-km-z]+$")
 
 # Chains whose addresses are EVM-shaped (0x + 40 hex).
 _EVM_CHAINS = {"eth", "ethereum", "bsc", "polygon", "arbitrum", "optimism",
-               "base", "avalanche", "fantom", "gnosis", "ethereum-classic"}
+               "base", "avalanche", "fantom", "gnosis", "ethereum-classic",
+               "zksync", "cronos", "blast"}
 
 
 def _address_ok(address: str, chain: str) -> bool:

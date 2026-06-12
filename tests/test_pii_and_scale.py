@@ -17,6 +17,8 @@ from cryptoatlas.core import (
     _classify_label, _ingest_token_list, _looks_like_pii, ENTITY_TYPES,
     CATEGORIES, CHAINS, fetch_ofac_sdn_mirror, fetch_etherscan_labels,
     fetch_uniswap_token_list, fetch_oneinch_token_lists, fetch_trustwallet_tokens,
+    fetch_multichain_explorer_labels, fetch_coingecko_token_lists,
+    fetch_defillama_protocols, _parse_scan_labels, _defillama_chain_addr,
 )
 
 
@@ -79,10 +81,12 @@ class TestPiiRejection(unittest.TestCase):
 class TestExpandedCatalog(unittest.TestCase):
     def test_catalog_grew(self):
         cat = source_catalog()
-        self.assertGreaterEqual(len(cat), 12)
+        self.assertGreaterEqual(len(cat), 16)
         ids = {s["id"] for s in cat}
         for want in ("ofac_sdn_mirror", "etherscan_labels", "uniswap_token_list",
-                     "oneinch_token_lists", "trustwallet_assets"):
+                     "oneinch_token_lists", "trustwallet_assets",
+                     "multichain_explorer_labels", "coingecko_token_lists",
+                     "defillama_protocols"):
             self.assertIn(want, ids)
 
     def test_catalog_types_valid_and_attributed(self):
@@ -91,7 +95,7 @@ class TestExpandedCatalog(unittest.TestCase):
             self.assertIn(s["type"], ENTITY_TYPES)
 
     def test_live_fetcher_registry(self):
-        self.assertGreaterEqual(len(LIVE_FETCHERS), 6)
+        self.assertGreaterEqual(len(LIVE_FETCHERS), 9)
         for source_id, fn in LIVE_FETCHERS:
             self.assertTrue(callable(fn))
             self.assertIsInstance(source_id, str)
@@ -140,13 +144,61 @@ class TestTokenListNormalization(unittest.TestCase):
         self.assertEqual(len(recs), 10)
 
 
+class TestScanLabelParser(unittest.TestCase):
+    """The per-chain explorer-label parser maps a combinedAllLabels.json blob
+    onto validated, correctly-chained Records (no private PII)."""
+
+    def test_parse_maps_chain_and_classifies(self):
+        data = {
+            "0x" + "1" * 40: {"name": "Binance: Hot Wallet", "labels": ["binance"]},
+            "0x" + "2" * 40: {"name": "Wormhole Bridge", "labels": ["bridge"]},
+            "0x" + "3" * 40: {"name": "MultiSig Vault Contract", "labels": []},
+            "not-an-address": {"name": "skip me"},          # skipped (bad addr)
+            "0x" + "4" * 40: {"labels": []},                 # skipped (no name)
+        }
+        recs = _parse_scan_labels(data, "bsc", "multichain_explorer_labels",
+                                  "https://raw.githubusercontent.com/x/y.json", 100)
+        self.assertEqual(len(recs), 3)
+        for r in recs:
+            self.assertEqual(r.chain, "bsc")
+            self.assertEqual(r.label_source, "multichain_explorer_labels")
+            validate(r)  # must pass the no-PII validator
+        self.assertEqual(recs[0].entity_type, "exchange")
+        self.assertEqual(recs[1].entity_type, "bridge")
+        self.assertEqual(recs[2].entity_type, "contract")
+
+    def test_parse_handles_non_dict(self):
+        self.assertEqual(_parse_scan_labels(None, "bsc", "s", "https://x", 10), [])
+        self.assertEqual(_parse_scan_labels([], "bsc", "s", "https://x", 10), [])
+
+
+class TestDefillamaAddressParser(unittest.TestCase):
+    def test_chain_prefixed_address(self):
+        chain, addr = _defillama_chain_addr("arbitrum:0x" + "A" * 40)
+        self.assertEqual(chain, "arbitrum")
+        self.assertEqual(addr, "0x" + "a" * 40)
+
+    def test_bare_address_is_ethereum(self):
+        chain, addr = _defillama_chain_addr("0x" + "B" * 40)
+        self.assertEqual(chain, "ethereum")
+        self.assertEqual(addr, "0x" + "b" * 40)
+
+    def test_unknown_chain_skipped(self):
+        self.assertEqual(_defillama_chain_addr("nosuchchain:0x" + "c" * 40), ("", ""))
+
+    def test_unparseable_address_skipped(self):
+        self.assertEqual(_defillama_chain_addr("ethereum:0xabc"), ("", ""))
+        self.assertEqual(_defillama_chain_addr(""), ("", ""))
+
+
 class TestFetchersFailSoft(unittest.TestCase):
     """Every live fetcher must return a list (never raise), online or offline."""
 
     def test_all_return_lists(self):
         for fn in (fetch_ofac_sdn_mirror, fetch_etherscan_labels,
                    fetch_uniswap_token_list, fetch_oneinch_token_lists,
-                   fetch_trustwallet_tokens):
+                   fetch_trustwallet_tokens, fetch_multichain_explorer_labels,
+                   fetch_coingecko_token_lists, fetch_defillama_protocols):
             self.assertIsInstance(fn(timeout=0.001), list)
 
 

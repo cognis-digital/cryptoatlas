@@ -99,24 +99,27 @@ public sources actually yield and `stats` reports the **real** `record_count`.
 ### Scale: live build today, and the path to 100k+
 
 `build` (with egress) fetches every registered public scale-source in turn.
-In a recent live build it ingested **~32.5k real, deduped, fully-attributed
+In a recent live build it ingested **~57k real, deduped, fully-attributed
 public records** (`cryptoatlas verify` → 100% pass). Each row carries its real
 `source_url`; nothing is fabricated.
 
-| source id              | what it adds                                            | scale |
-|------------------------|---------------------------------------------------------|-------|
-| `etherscan_labels`     | ~30k Ethereum addresses with PUBLIC Etherscan entity/protocol/contract labels | ~29k |
-| `ofac_sdn_mirror`      | Full per-chain OFAC SDN digital-currency address mirror (16 tickers) | ~780 |
-| `oneinch_token_lists`  | 1inch multi-chain token-contract→issuer maps (ETH/BSC/Polygon/Arbitrum/Optimism/…) | ~1.6k |
-| `uniswap_token_list`   | Canonical Uniswap default token list (issuer-labeled contracts) | ~1k |
-| `trustwallet_assets`   | Trust Wallet multi-chain token-contract registry | ~400 |
-| `ofac_sdn_crypto`      | OFAC SDN direct feed (treasury.gov; live-fetched)       | — |
-| `gov_btc_treasuries`   | Public-company / government BTC treasury disclosures    | seed |
-| `us_marshals_seizures` | DOJ/USMS seizure press releases with wallet addresses   | seed |
-| `spot_etf_custody`     | SEC EDGAR spot-ETF custody filings                      | seed |
-| `exchange_cold_wallets`| Community/PoR-attested exchange labels                  | seed |
-| `rich_list_snapshot`   | Public rich-list snapshots (labeled clusters **only**)  | seed |
-| `strategic_reserve`    | National strategic-reserve disclosures                  | seed |
+| source id                    | what it adds                                            | scale |
+|------------------------------|---------------------------------------------------------|-------|
+| `etherscan_labels`           | ~30k Ethereum addresses with PUBLIC Etherscan entity/protocol/contract labels | ~29k |
+| `multichain_explorer_labels` | Public per-chain explorer labels (BSC/Polygon/Arbitrum/Optimism/Fantom/Avalanche) | ~14k |
+| `coingecko_token_lists`      | CoinGecko per-platform token lists (9 chains; Uniswap-schema) | ~11k |
+| `defillama_protocols`        | DefiLlama protocol registry → on-chain contract labels (protocol/CEX/bridge) | ~2k |
+| `ofac_sdn_mirror`            | Full per-chain OFAC SDN digital-currency address mirror (16 tickers) | ~780 |
+| `oneinch_token_lists`        | 1inch multi-chain token-contract→issuer maps (ETH/BSC/Polygon/Arbitrum/Optimism/Base/Avalanche/Gnosis/zkSync) | ~0.9k |
+| `uniswap_token_list`         | Canonical Uniswap default token list (issuer-labeled contracts) | ~0.9k |
+| `trustwallet_assets`         | Trust Wallet multi-chain token-contract registry | ~50 |
+| `ofac_sdn_crypto`            | OFAC SDN direct feed (treasury.gov; live-fetched)       | — |
+| `gov_btc_treasuries`         | Public-company / government BTC treasury disclosures    | seed |
+| `us_marshals_seizures`       | DOJ/USMS seizure press releases with wallet addresses   | seed |
+| `spot_etf_custody`           | SEC EDGAR spot-ETF custody filings                      | seed |
+| `exchange_cold_wallets`      | Community/PoR-attested exchange labels                  | seed |
+| `rich_list_snapshot`         | Public rich-list snapshots (labeled clusters **only**)  | seed |
+| `strategic_reserve`          | National strategic-reserve disclosures                  | seed |
 
 **Realistic path to 100,000+ PUBLIC entity-level records** — every lever below
 is a genuinely public, attributable source; no PII, no fabrication:
