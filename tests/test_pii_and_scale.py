@@ -21,6 +21,8 @@ from cryptoatlas.core import (
     fetch_defillama_protocols, _parse_scan_labels, _defillama_chain_addr,
     fetch_extra_token_lists, fetch_trustwallet_assets,
     fetch_opensanctions_crypto, _os_chain_for, _tw_address_ok,
+    _ingest_solana_token_list, fetch_solana_token_lists,
+    fetch_nft_contract_lists, fetch_stargate_tokens,
 )
 
 
@@ -237,11 +239,13 @@ class TestNewSourcesRegistered(unittest.TestCase):
     def test_new_sources_in_catalog_and_registry(self):
         ids = {s["id"] for s in source_catalog()}
         for want in ("trustwallet_assets_full", "extra_token_lists",
-                     "opensanctions_crypto"):
+                     "opensanctions_crypto", "solana_token_lists",
+                     "nft_contract_lists", "stargate_tokens"):
             self.assertIn(want, ids)
         reg = {sid for sid, _ in LIVE_FETCHERS}
         for want in ("trustwallet_assets_full", "extra_token_lists",
-                     "opensanctions_crypto"):
+                     "opensanctions_crypto", "solana_token_lists",
+                     "nft_contract_lists", "stargate_tokens"):
             self.assertIn(want, reg)
 
     def test_new_chains_present(self):
@@ -258,8 +262,57 @@ class TestFetchersFailSoft(unittest.TestCase):
                    fetch_trustwallet_tokens, fetch_multichain_explorer_labels,
                    fetch_coingecko_token_lists, fetch_defillama_protocols,
                    fetch_extra_token_lists, fetch_trustwallet_assets,
-                   fetch_opensanctions_crypto):
+                   fetch_opensanctions_crypto, fetch_solana_token_lists,
+                   fetch_nft_contract_lists, fetch_stargate_tokens):
             self.assertIsInstance(fn(timeout=0.001), list)
+
+
+class TestSolanaTokenListParser(unittest.TestCase):
+    """The Solana SPL ingester keeps only mainnet base58 mint contracts and
+    produces validated, correctly-chained Records (no private PII)."""
+
+    def test_maps_base58_mints(self):
+        toks = [
+            {"chainId": 101, "address": "So11111111111111111111111111111111111111112",
+             "name": "Wrapped SOL", "symbol": "SOL"},
+            {"chainId": 101, "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+             "name": "USD Coin", "symbol": "USDC"},
+            {"chainId": 102, "address": "So11111111111111111111111111111111111111112",
+             "name": "Devnet token"},                 # skipped (not mainnet)
+            {"chainId": 101, "address": "0x" + "a" * 40, "name": "EVM addr"},  # skipped
+            {"chainId": 101, "address": "So11111111111111111111111111111111111111112"},  # no name -> uses none, skipped
+        ]
+        recs = _ingest_solana_token_list(
+            toks, "solana_token_lists",
+            "https://raw.githubusercontent.com/solana-labs/token-list/main/"
+            "src/tokens/solana.tokenlist.json", 100)
+        self.assertEqual(len(recs), 2)
+        for r in recs:
+            self.assertEqual(r.chain, "solana")
+            self.assertEqual(r.entity_type, "token")
+            self.assertEqual(r.category, "token-contract")
+            validate(r)  # must pass the no-PII validator
+
+    def test_no_chainid_defaults_to_solana(self):
+        # Jupiter rows may omit chainId; a valid base58 mint is still kept.
+        toks = [{"address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                 "name": "USD Coin", "symbol": "USDC"}]
+        recs = _ingest_solana_token_list(toks, "solana_token_lists",
+                                         "https://cache.jup.ag/tokens", 100)
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0].chain, "solana")
+
+    def test_cap_respected(self):
+        toks = [{"chainId": 101,
+                 "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                 "name": f"Tok{i}"} for i in range(20)]
+        # all share an address so only 1 unique, but cap is applied pre-dedupe
+        recs = _ingest_solana_token_list(toks, "s", "https://x/", 5)
+        self.assertEqual(len(recs), 5)
+
+    def test_handles_non_dict(self):
+        self.assertEqual(_ingest_solana_token_list([1, "x", None], "s",
+                                                   "https://x/", 10), [])
 
 
 if __name__ == "__main__":

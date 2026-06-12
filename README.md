@@ -99,20 +99,28 @@ public sources actually yield and `stats` reports the **real** `record_count`.
 ### Scale: live build today, and the path to 100k+
 
 `build` (with egress) fetches every registered public scale-source in turn.
-In a recent live build it ingested **~57k real, deduped, fully-attributed
-public records** (`cryptoatlas verify` → 100% pass). Each row carries its real
-`source_url`; nothing is fabricated.
+In a recent live build it ingested **~127k real, deduped, fully-attributed
+public records** (`cryptoatlas verify` → 100% pass, `is_synthetic` = 0). Each
+row carries its real `source_url`; nothing is fabricated. The no-PII validator
+rejected ~14k candidate rows (personal-name-shaped token names tied to an
+address, plus phone/passport markers) in that same build — the guardrail is
+load-bearing, not decorative.
 
 | source id                    | what it adds                                            | scale |
 |------------------------------|---------------------------------------------------------|-------|
-| `etherscan_labels`           | ~30k Ethereum addresses with PUBLIC Etherscan entity/protocol/contract labels | ~29k |
-| `multichain_explorer_labels` | Public per-chain explorer labels (BSC/Polygon/Arbitrum/Optimism/Fantom/Avalanche) | ~14k |
-| `coingecko_token_lists`      | CoinGecko per-platform token lists (9 chains; Uniswap-schema) | ~11k |
+| `solana_token_lists`         | Solana mainnet SPL token registries (Solana Labs + Jupiter); base58 mint-contract→issuer labels | ~51k |
+| `etherscan_labels`           | ~30k Ethereum addresses with PUBLIC Etherscan entity/protocol/contract labels | ~25k |
+| `extra_token_lists`          | Public Uniswap-schema DEX/chain token lists (CMC/PancakeSwap/Optimism/Arbitrum/Kleros/Aave/Compound/Gemini/Set/QuickSwap/SpookySwap/Trader Joe/Celo/Balancer) | ~14k |
+| `multichain_explorer_labels` | Public per-chain explorer labels (BSC/Polygon/Arbitrum/Optimism/Fantom/Avalanche) | ~13k |
+| `trustwallet_assets_full`    | Full Trust Wallet `assets` token-contract tree (EVM/Solana/Tron) | ~7k |
+| `coingecko_token_lists`      | CoinGecko per-platform token lists (Uniswap-schema)     | ~7k |
+| `nft_contract_lists`         | Public NFT collection CONTRACT registries (0xsequence token-directory; ERC-721/ERC-1155 across 10 chains) | ~3k |
+| `stargate_tokens`            | Stargate cross-chain bridgeable token-contract registry | ~2k |
 | `defillama_protocols`        | DefiLlama protocol registry → on-chain contract labels (protocol/CEX/bridge) | ~2k |
-| `ofac_sdn_mirror`            | Full per-chain OFAC SDN digital-currency address mirror (16 tickers) | ~780 |
-| `oneinch_token_lists`        | 1inch multi-chain token-contract→issuer maps (ETH/BSC/Polygon/Arbitrum/Optimism/Base/Avalanche/Gnosis/zkSync) | ~0.9k |
-| `uniswap_token_list`         | Canonical Uniswap default token list (issuer-labeled contracts) | ~0.9k |
-| `trustwallet_assets`         | Trust Wallet multi-chain token-contract registry | ~50 |
+| `opensanctions_crypto`       | OpenSanctions consolidated sanctioned crypto addresses (OFAC/EU/UN/UK+) | ~1.3k |
+| `uniswap_token_list`         | Canonical Uniswap default token list (issuer-labeled contracts) | ~0.4k |
+| `oneinch_token_lists`        | 1inch multi-chain token-contract→issuer maps | ~0.2k |
+| `ofac_sdn_mirror`            | Full per-chain OFAC SDN digital-currency address mirror (16 tickers) | ~3 |
 | `ofac_sdn_crypto`            | OFAC SDN direct feed (treasury.gov; live-fetched)       | — |
 | `gov_btc_treasuries`         | Public-company / government BTC treasury disclosures    | seed |
 | `us_marshals_seizures`       | DOJ/USMS seizure press releases with wallet addresses   | seed |

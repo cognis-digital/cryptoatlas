@@ -416,6 +416,38 @@ SOURCE_CATALOG: List[Dict[str, str]] = [
                  "entity name + category (DeFi protocol, CEX, bridge). "
                  "Entity/contract-level only, no private PII.",
     },
+    {
+        "id": "solana_token_lists",
+        "name": "Solana SPL token registries (Solana Labs + Jupiter)",
+        "url": "https://raw.githubusercontent.com/solana-labs/token-list/main/"
+               "src/tokens/solana.tokenlist.json",
+        "type": "token",
+        "notes": "Public Solana mainnet SPL token registries: the Solana Labs "
+                 "token-list and the Jupiter aggregator token list. Each base58 "
+                 "mint-contract address -> issuer/project name. Token/contract-"
+                 "level only, no private PII.",
+    },
+    {
+        "id": "nft_contract_lists",
+        "name": "Public NFT collection CONTRACT registries (0xsequence)",
+        "url": "https://github.com/0xsequence/token-directory",
+        "type": "contract",
+        "notes": "Per-chain ERC-721 / ERC-1155 NFT collection CONTRACT lists from "
+                 "the public 0xsequence token-directory (mainnet/Arbitrum/"
+                 "Avalanche/Base/BNB/Gnosis/Optimism/Polygon/Polygon-zkEVM/Sonic). "
+                 "Each row is a collection's deployed contract address + public "
+                 "name — CONTRACTS not holders; entity/contract-level, no PII.",
+    },
+    {
+        "id": "stargate_tokens",
+        "name": "Stargate bridgeable-token registry",
+        "url": "https://stargate.finance/api/tokens",
+        "type": "token",
+        "notes": "Stargate's public list of cross-chain bridgeable tokens; each "
+                 "chainKey + on-chain address -> token name/symbol across EVM/"
+                 "Solana/Tron chains. Token-contract labels only; entity/contract-"
+                 "level, no private PII.",
+    },
 ]
 
 
@@ -986,6 +1018,17 @@ _EXTRA_TOKEN_LISTS = (
      "ethereum", "Gemini token list"),
     ("https://raw.githubusercontent.com/SetProtocol/uniswap-tokenlist/main/"
      "set.tokenlist.json", "ethereum", "Set Protocol token list"),
+    # --- additional public DEX / chain token lists (verified fetchable) ---
+    ("https://unpkg.com/quickswap-default-token-list@latest/build/"
+     "quickswap-default.tokenlist.json", "polygon", "QuickSwap default token list"),
+    ("https://raw.githubusercontent.com/SpookySwap/spooky-info/master/src/"
+     "constants/token/spookyswap.json", "fantom", "SpookySwap token list"),
+    ("https://raw.githubusercontent.com/traderjoe-xyz/joe-tokenlists/main/"
+     "mc.tokenlist.json", "avalanche", "Trader Joe multi-chain token list"),
+    ("https://celo-org.github.io/celo-token-list/celo.tokenlist.json",
+     "celo", "Celo token list"),
+    ("https://raw.githubusercontent.com/balancer/tokenlists/main/generated/"
+     "balancer.tokenlist.json", "ethereum", "Balancer token list"),
 )
 
 
@@ -1005,6 +1048,194 @@ def fetch_extra_token_lists(timeout: float = 25.0,
             continue
         out.extend(_ingest_token_list(toks, "extra_token_lists", url,
                                       default_chain, cap - len(out)))
+        if len(out) >= cap:
+            break
+    return out
+
+
+# --- Solana SPL token registries (base58 mint addresses, not EVM) -----------
+# Solana mints are base58 (32-44 chars), so they need a dedicated ingester:
+# _ingest_token_list only accepts EVM ``0x`` addresses. Both registries follow
+# a tokens-array / flat-array shape with {chainId:101, address, name, symbol}.
+# Token (mint) contract -> issuer/project labels only; entity/contract-level.
+_SOLANA_TOKEN_LISTS = (
+    ("https://raw.githubusercontent.com/solana-labs/token-list/main/src/"
+     "tokens/solana.tokenlist.json", "Solana Labs token registry"),
+    ("https://cache.jup.ag/tokens", "Jupiter aggregator token list"),
+)
+
+
+def _ingest_solana_token_list(tokens: List[Dict[str, Any]], source_id: str,
+                              url: str, cap: int) -> List[Record]:
+    """Parse a Solana SPL token list into Records.
+
+    Keeps only mainnet (chainId 101 when present) base58 mint addresses that pass
+    the Solana on-chain shape (32-44 base58 chars). Mint-contract -> issuer label
+    only; public, entity/contract-level, no private PII.
+    """
+    out: List[Record] = []
+    for t in tokens:
+        if not isinstance(t, dict):
+            continue
+        cid = t.get("chainId")
+        if cid is not None and cid != 101:  # only Solana mainnet-beta
+            continue
+        addr = (t.get("address") or "").strip()
+        if not (_RE_B58.match(addr) and 32 <= len(addr) <= 44):
+            continue
+        name = (t.get("name") or t.get("symbol") or "").strip()
+        if not name:
+            continue
+        out.append(Record(
+            address=addr, chain="solana", entity_name=name,
+            entity_type="token", category="token-contract",
+            label_source=source_id, source_url=url,
+            balance_hint=(t.get("symbol") or ""),
+            notes="Solana SPL mint-contract issuer label from a public token list.",
+        ))
+        if len(out) >= cap:
+            break
+    return out
+
+
+def fetch_solana_token_lists(timeout: float = 45.0,
+                             cap: int = 60_000) -> List[Record]:
+    """Pull public Solana SPL token registries (Solana Labs + Jupiter).
+
+    Solana mints are base58 token contracts; each carries a public issuer/project
+    name. Entity/contract-level only, no private PII. Fail-soft per list.
+    """
+    out: List[Record] = []
+    for url, _label in _SOLANA_TOKEN_LISTS:
+        data = _http_get_json(url, timeout=timeout)
+        # Solana Labs: {"tokens": [...]}; Jupiter cache: a flat [...] list.
+        if isinstance(data, dict):
+            toks = data.get("tokens")
+        elif isinstance(data, list):
+            toks = data
+        else:
+            toks = None
+        if not isinstance(toks, list):
+            continue
+        out.extend(_ingest_solana_token_list(toks, "solana_token_lists", url,
+                                             cap - len(out)))
+        if len(out) >= cap:
+            break
+    return out
+
+
+# --- Public NFT collection CONTRACT registries (0xsequence token-directory) --
+# 0xsequence publishes per-chain Uniswap-schema files of ERC-721 / ERC-1155 NFT
+# collection CONTRACTS (each {chainId, address, name, symbol, standard}). These
+# are CONTRACT addresses (the collection), never a private holder — entity/
+# contract-level only. chainId routes each row via _EVM_CHAIN_BY_ID.
+_SEQ_NFT_BASE = ("https://raw.githubusercontent.com/0xsequence/token-directory/"
+                 "master/index/{slug}/{kind}.json")
+# Sequence dir slugs whose chainId we can attribute to a cryptoatlas chain.
+_SEQ_NFT_SLUGS = (
+    "mainnet", "arbitrum", "avalanche", "base", "bnb", "gnosis",
+    "optimism", "polygon", "polygon-zkevm", "sonic",
+)
+_SEQ_NFT_KINDS = ("erc721", "erc1155")
+
+
+def fetch_nft_contract_lists(timeout: float = 30.0,
+                             cap: int = 40_000) -> List[Record]:
+    """Pull public NFT collection CONTRACT registries (0xsequence token-directory).
+
+    Enumerates per-chain ``erc721.json`` / ``erc1155.json`` files; each row is an
+    NFT collection's deployed contract address + public collection name. CONTRACT
+    addresses only (not holders) — entity/contract-level, no private PII. chainId
+    in each entry routes via _EVM_CHAIN_BY_ID. Fail-soft per file.
+    """
+    out: List[Record] = []
+    for slug in _SEQ_NFT_SLUGS:
+        for kind in _SEQ_NFT_KINDS:
+            url = _SEQ_NFT_BASE.format(slug=slug, kind=kind)
+            data = _http_get_json(url, timeout=timeout)
+            toks = data.get("tokens") if isinstance(data, dict) else None
+            if not isinstance(toks, list):
+                continue
+            for t in toks:
+                if not isinstance(t, dict):
+                    continue
+                addr = (t.get("address") or "").strip().lower()
+                if not (addr.startswith("0x") and len(addr) == 42):
+                    continue
+                name = (t.get("name") or t.get("symbol") or "").strip()
+                if not name:
+                    continue
+                chain = _EVM_CHAIN_BY_ID.get(t.get("chainId"))
+                if not chain or chain not in CHAINS:
+                    continue
+                out.append(Record(
+                    address=addr, chain=chain, entity_name=name,
+                    entity_type="contract", category="token-contract",
+                    label_source="nft_contract_lists", source_url=url,
+                    balance_hint=(t.get("symbol") or kind.upper()),
+                    notes=f"Public NFT collection {kind.upper()} contract label "
+                          "(0xsequence token-directory); entity/contract-level.",
+                ))
+                if len(out) >= cap:
+                    return out
+    return out
+
+
+# --- Stargate cross-chain bridged-token registry ----------------------------
+# Stargate publishes its bridgeable token set as a flat list whose rows carry a
+# ``chainKey`` (chain slug, NOT a numeric chainId) + an on-chain ``address``.
+# Map the chainKey to a cryptoatlas chain; keep only EVM/Solana/Tron addresses
+# whose shape verifies. Bridged token-contract labels only; entity-level, no PII.
+_STARGATE_TOKENS_URL = "https://stargate.finance/api/tokens"
+_STARGATE_CHAINKEY = {
+    "ethereum": "ethereum", "bsc": "bsc", "polygon": "polygon",
+    "arbitrum": "arbitrum", "optimism": "optimism", "base": "base",
+    "avalanche": "avalanche", "fantom": "fantom", "linea": "linea",
+    "mantle": "mantle", "scroll": "scroll", "metis": "metis", "kava": "kava",
+    "aurora": "aurora", "moonbeam": "moonbeam", "moonriver": "moonriver",
+    "sonic": "sonic", "blast": "blast", "mode": "mode", "fraxtal": "fraxtal",
+    "gnosis": "gnosis", "zksync": "zksync", "manta": "manta", "fuse": "fuse",
+    "astar": "astar", "rootstock": "rootstock", "celo": "celo",
+    "solana": "solana", "tron": "tron",
+}
+
+
+def fetch_stargate_tokens(timeout: float = 30.0,
+                          cap: int = 10_000) -> List[Record]:
+    """Pull Stargate's public bridgeable-token registry (cross-chain contracts).
+
+    Each row maps a ``chainKey`` (chain slug) + on-chain ``address`` to a public
+    token name/symbol. Bridged token-contract labels only; entity/contract-level,
+    no private PII. Only addresses that verify for their resolved chain are kept.
+    Fail-soft -> [] if unreachable.
+    """
+    data = _http_get_json(_STARGATE_TOKENS_URL, timeout=timeout)
+    toks = data if isinstance(data, list) else (
+        data.get("tokens") if isinstance(data, dict) else None)
+    if not isinstance(toks, list):
+        return []
+    out: List[Record] = []
+    for t in toks:
+        if not isinstance(t, dict):
+            continue
+        chain = _STARGATE_CHAINKEY.get((t.get("chainKey") or "").strip().lower())
+        if not chain or chain not in CHAINS:
+            continue
+        addr = (t.get("address") or "").strip()
+        norm = addr.lower() if _RE_EVM.match(addr) else addr
+        if not _address_ok(norm, chain):
+            continue
+        name = (t.get("name") or t.get("symbol") or "").strip()
+        if not name:
+            continue
+        out.append(Record(
+            address=norm, chain=chain, entity_name=name,
+            entity_type="token", category="token-contract",
+            label_source="stargate_tokens", source_url=_STARGATE_TOKENS_URL,
+            balance_hint=(t.get("symbol") or ""),
+            notes="Stargate bridgeable token-contract label (public); "
+                  "entity/contract-level.",
+        ))
         if len(out) >= cap:
             break
     return out
@@ -1303,6 +1534,9 @@ LIVE_FETCHERS = (
     ("extra_token_lists", fetch_extra_token_lists),
     ("opensanctions_crypto", fetch_opensanctions_crypto),
     ("defillama_protocols", fetch_defillama_protocols),
+    ("solana_token_lists", fetch_solana_token_lists),
+    ("nft_contract_lists", fetch_nft_contract_lists),
+    ("stargate_tokens", fetch_stargate_tokens),
 )
 
 
