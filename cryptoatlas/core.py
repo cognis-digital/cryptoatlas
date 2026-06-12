@@ -18,6 +18,7 @@ so the dataset is never fabricated and always provenance-tagged.
 
 from __future__ import annotations
 
+import concurrent.futures as _cf
 import csv
 import hashlib
 import io
@@ -59,6 +60,12 @@ CHAINS = (
     "bsc", "optimism", "base", "avalanche", "fantom", "gnosis",
     "ethereum-classic", "monero", "zcash", "dash", "verge",
     "zksync", "cronos", "blast",
+    # additional public EVM / L2 / sidechain platforms (token-contract labels)
+    "celo", "linea", "mantle", "scroll", "moonbeam", "moonriver",
+    "aurora", "metis", "kava", "harmony", "heco", "okc", "kcc",
+    "boba", "fuse", "polygon-zkevm", "core", "sonic", "ronin",
+    "pulsechain", "astar", "dogechain", "manta", "mode", "fraxtal",
+    "rootstock", "dogecoin",
 )
 
 
@@ -368,6 +375,36 @@ SOURCE_CATALOG: List[Dict[str, str]] = [
         "notes": "CoinGecko publishes a Uniswap-schema token list per chain "
                  "platform (Ethereum/Polygon/BSC/Arbitrum/Optimism/Avalanche/"
                  "Base/Fantom/Gnosis). Token-contract -> issuer/project labels.",
+    },
+    {
+        "id": "trustwallet_assets_full",
+        "name": "Trust Wallet assets — full multi-chain token registry",
+        "url": "https://github.com/trustwallet/assets",
+        "type": "token",
+        "notes": "Every blockchains/<chain>/assets/<address>/info.json across the "
+                 "Trust Wallet assets repo (EVM/Solana/Tron chains we can verify). "
+                 "Enumerated via one git-tree call, names from each info.json. "
+                 "Token-contract -> issuer label; public, entity/contract-level.",
+    },
+    {
+        "id": "extra_token_lists",
+        "name": "Additional public Uniswap-schema token lists",
+        "url": "https://api.coinmarketcap.com/data-api/v3/uniswap/all.json",
+        "type": "token",
+        "notes": "CoinMarketCap, PancakeSwap (extended+top100), Optimism, "
+                 "Arbitrum-bridged, Kleros T2CR, Aave, Compound, Gemini and Set "
+                 "Protocol token lists. Token-contract -> issuer/project labels; "
+                 "entity/contract-level, no private PII.",
+    },
+    {
+        "id": "opensanctions_crypto",
+        "name": "OpenSanctions consolidated sanctioned crypto addresses",
+        "url": "https://data.opensanctions.org/datasets/latest/sanctions/entities.ftm.json",
+        "type": "sanctioned",
+        "notes": "CryptoWallet entities from the OpenSanctions consolidated "
+                 "sanctions dataset (aggregates OFAC + EU + UN + UK OFSI + more "
+                 "public lists). Each publicKey -> verifiable chain. Entity-level "
+                 "sanctioned-address labels only; no private-individual PII.",
     },
     {
         "id": "defillama_protocols",
@@ -789,6 +826,14 @@ _EVM_CHAIN_BY_ID = {
     1: "ethereum", 10: "optimism", 56: "bsc", 137: "polygon",
     250: "fantom", 8453: "base", 42161: "arbitrum", 43114: "avalanche",
     100: "gnosis", 324: "zksync", 25: "cronos", 81457: "blast",
+    # additional public EVM platforms
+    42220: "celo", 59144: "linea", 5000: "mantle", 534352: "scroll",
+    1284: "moonbeam", 1285: "moonriver", 1313161554: "aurora",
+    1088: "metis", 2222: "kava", 1666600000: "harmony", 128: "heco",
+    66: "okc", 321: "kcc", 288: "boba", 122: "fuse", 1101: "polygon-zkevm",
+    1116: "core", 146: "sonic", 2020: "ronin", 369: "pulsechain",
+    592: "astar", 2000: "dogechain", 169: "manta", 34443: "mode",
+    252: "fraxtal", 30: "rootstock",
 }
 
 
@@ -881,6 +926,15 @@ _COINGECKO_PLATFORMS = {
     "binance-smart-chain": "bsc", "arbitrum-one": "arbitrum",
     "optimistic-ethereum": "optimism", "avalanche": "avalanche",
     "base": "base", "fantom": "fantom", "xdai": "gnosis",
+    # additional public CoinGecko asset platforms that serve /all.json
+    "celo": "celo", "linea": "linea", "mantle": "mantle", "scroll": "scroll",
+    "moonbeam": "moonbeam", "moonriver": "moonriver", "aurora": "aurora",
+    "metis-andromeda": "metis", "kava": "kava", "harmony-shard-0": "harmony",
+    "huobi-token": "heco", "okex-chain": "okc",
+    "kucoin-community-chain": "kcc", "boba": "boba", "fuse": "fuse",
+    "core": "core", "sonic": "sonic", "ronin": "ronin",
+    "pulsechain": "pulsechain", "astar": "astar", "dogechain": "dogechain",
+    "cronos": "cronos",
 }
 
 
@@ -903,6 +957,256 @@ def fetch_coingecko_token_lists(timeout: float = 30.0,
                                       cap - len(out)))
         if len(out) >= cap:
             break
+    return out
+
+
+# Additional public token lists that follow the Uniswap token-list schema
+# (``{"tokens": [{chainId, address, name, symbol}, ...]}``). Each is a public,
+# project-published registry of token-contract -> issuer/project labels. The
+# chainId in every entry routes the row to the right chain via _EVM_CHAIN_BY_ID;
+# default_chain is only a fall-back for an unmapped chainId.
+_EXTRA_TOKEN_LISTS = (
+    ("https://api.coinmarketcap.com/data-api/v3/uniswap/all.json",
+     "ethereum", "CoinMarketCap public token list"),
+    ("https://tokens.pancakeswap.finance/pancakeswap-extended.json",
+     "bsc", "PancakeSwap extended token list"),
+    ("https://tokens.pancakeswap.finance/pancakeswap-top-100.json",
+     "bsc", "PancakeSwap top-100 token list"),
+    ("https://static.optimism.io/optimism.tokenlist.json",
+     "optimism", "Optimism bridged token list"),
+    ("https://bridge.arbitrum.io/token-list-42161.json",
+     "arbitrum", "Arbitrum bridged token list"),
+    ("https://t2crtokens.eth.link/",
+     "ethereum", "Kleros Tokens (T2CR) curated list"),
+    ("https://tokenlist.aave.eth.link/",
+     "ethereum", "Aave token list"),
+    ("https://raw.githubusercontent.com/compound-finance/token-list/master/"
+     "compound.tokenlist.json", "ethereum", "Compound token list"),
+    ("https://www.gemini.com/uniswap/manifest.json",
+     "ethereum", "Gemini token list"),
+    ("https://raw.githubusercontent.com/SetProtocol/uniswap-tokenlist/main/"
+     "set.tokenlist.json", "ethereum", "Set Protocol token list"),
+)
+
+
+def fetch_extra_token_lists(timeout: float = 25.0,
+                            cap: int = 60_000) -> List[Record]:
+    """Pull additional public Uniswap-schema token lists (CMC / PancakeSwap /
+    Optimism / Arbitrum-bridged / Kleros / Aave / Compound / Gemini / Set).
+
+    Token-contract -> issuer/project labels only; entity/contract-level, no
+    private PII. Each individual list is fail-soft; skips any that 404s/SSL-fails.
+    """
+    out: List[Record] = []
+    for url, default_chain, _label in _EXTRA_TOKEN_LISTS:
+        data = _http_get_json(url, timeout=timeout)
+        toks = data.get("tokens") if isinstance(data, dict) else None
+        if not isinstance(toks, list):
+            continue
+        out.extend(_ingest_token_list(toks, "extra_token_lists", url,
+                                      default_chain, cap - len(out)))
+        if len(out) >= cap:
+            break
+    return out
+
+
+# Trust Wallet ``assets`` blockchain slug -> cryptoatlas chain. We ingest only
+# chains whose on-chain address shape we can verify (EVM / Solana / Tron); other
+# Trust Wallet chains (Cosmos/TON/Aptos/etc.) are skipped, never guessed.
+_TW_ASSET_CHAINS = {
+    "ethereum": "ethereum", "smartchain": "bsc", "polygon": "polygon",
+    "arbitrum": "arbitrum", "optimism": "optimism", "avalanchec": "avalanche",
+    "base": "base", "classic": "ethereum-classic", "fantom": "fantom",
+    "xdai": "gnosis", "blast": "blast", "scroll": "scroll", "linea": "linea",
+    "zksync": "zksync", "mantle": "mantle", "celo": "celo", "heco": "heco",
+    "kcc": "kcc", "sonic": "sonic", "cronos": "cronos", "moonbeam": "moonbeam",
+    "moonriver": "moonriver", "aurora": "aurora", "metis": "metis",
+    "boba": "boba", "fuse": "fuse", "okc": "okc", "manta": "manta",
+    "rootstock": "rootstock", "tomochain": "ethereum",
+    "solana": "solana", "tron": "tron",
+}
+_TW_TREE_URL = ("https://api.github.com/repos/trustwallet/assets/git/trees/"
+                "master?recursive=1")
+_TW_RAW = ("https://raw.githubusercontent.com/trustwallet/assets/master/"
+           "blockchains/{slug}/assets/{addr}/info.json")
+_TW_PATH_RE = re.compile(
+    r"^blockchains/([^/]+)/assets/([^/]+)/info\.json$")
+
+
+def _tw_address_ok(addr: str, chain: str) -> bool:
+    """Verify a Trust Wallet asset directory name is an on-chain address we
+    can attribute to the given chain (EVM / Solana / Tron)."""
+    if chain in _EVM_CHAINS:
+        return bool(_RE_EVM.match(addr))
+    if chain == "solana":
+        return bool(_RE_B58.match(addr)) and 32 <= len(addr) <= 44
+    if chain == "tron":
+        return bool(_RE_TRON.match(addr))
+    return False
+
+
+def fetch_trustwallet_assets(timeout: float = 30.0,
+                             cap: int = 30_000,
+                             max_workers: int = 24) -> List[Record]:
+    """Pull the FULL Trust Wallet ``assets`` token registry across all chains.
+
+    Enumerates every ``blockchains/<chain>/assets/<address>/info.json`` via one
+    git-tree call, then fetches each ``info.json`` in parallel for the public
+    token name/symbol. Token-contract -> issuer/project labels only; the asset
+    directory name is the contract address. Entity/contract-level, no PII.
+
+    Fail-soft: returns [] if the tree is unreachable; skips any asset whose
+    info.json 404s, whose chain we can't verify, or whose address is malformed.
+    """
+    tree = _http_get_json(_TW_TREE_URL, timeout=timeout)
+    if not isinstance(tree, dict) or not isinstance(tree.get("tree"), list):
+        return []
+    targets: List[Tuple[str, str, str]] = []  # (chain, addr, url)
+    for node in tree["tree"]:
+        path = node.get("path") if isinstance(node, dict) else None
+        if not path:
+            continue
+        m = _TW_PATH_RE.match(path)
+        if not m:
+            continue
+        slug, addr = m.group(1), m.group(2)
+        chain = _TW_ASSET_CHAINS.get(slug)
+        if not chain:
+            continue
+        norm = addr.lower() if _RE_EVM.match(addr) else addr
+        if not _tw_address_ok(norm, chain):
+            continue
+        targets.append((chain, norm, _TW_RAW.format(slug=slug, addr=addr)))
+        if len(targets) >= cap:
+            break
+
+    def _fetch_one(t: Tuple[str, str, str]) -> Optional[Record]:
+        chain, addr, url = t
+        info = _http_get_json(url, timeout=timeout)
+        name = symbol = ""
+        if isinstance(info, dict):
+            name = (info.get("name") or "").strip()
+            symbol = (info.get("symbol") or "").strip()
+        if not name:
+            name = symbol or "Trust Wallet listed token"
+        return Record(
+            address=addr, chain=chain, entity_name=name,
+            entity_type="token", category="token-contract",
+            label_source="trustwallet_assets_full", source_url=url,
+            balance_hint=symbol,
+            notes="Token-contract issuer label from the Trust Wallet assets "
+                  "registry (public, entity/contract-level).",
+        )
+
+    out: List[Record] = []
+    if not targets:
+        return out
+    with _cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for rec in ex.map(_fetch_one, targets):
+            if rec is not None:
+                out.append(rec)
+    return out
+
+
+# OpenSanctions consolidated sanctions dataset (aggregates OFAC + EU + UN + UK +
+# more public lists). Its FollowTheMoney ``CryptoWallet`` entities expose a
+# ``publicKey`` (on-chain address) + ``currency`` (chain ticker). Entity-level
+# sanctioned-address labels only; ``holder`` is an internal code, not PII.
+_OPENSANCTIONS_FTM = ("https://data.opensanctions.org/datasets/latest/"
+                      "sanctions/entities.ftm.json")
+_OS_CURRENCY_CHAIN = {
+    "XBT": "bitcoin", "BTC": "bitcoin", "BSV": "bitcoin", "BTG": "bitcoin",
+    "ETH": "ethereum", "USDT": "ethereum", "USDC": "ethereum",
+    "TRX": "tron", "LTC": "litecoin", "XMR": "monero", "DOGE": "dogecoin",
+    "BCH": "bitcoin-cash", "ZEC": "zcash", "DASH": "dash", "XRP": "ripple",
+    "XVG": "verge", "ETC": "ethereum-classic", "ARB": "arbitrum",
+    "BSC": "bsc", "BNB": "bsc", "SOL": "solana",
+}
+
+
+def _os_chain_for(addr: str, currency: str) -> str:
+    """Resolve an OpenSanctions CryptoWallet to a verifiable cryptoatlas chain.
+
+    Prefer the unambiguous address shape (EVM/Tron/bech32-BTC); else fall back
+    to the declared currency ticker. The returned (chain, addr) pair MUST pass
+    ``_address_ok`` — OpenSanctions sometimes carries homoglyph/Unicode-confusable
+    obfuscation variants of an address; those don't match a clean on-chain shape
+    and are skipped (return '') rather than mis-attributed. Returns '' if not
+    verifiably mappable."""
+    a = (addr or "").strip()
+    # Reject any non-ASCII publicKey outright (homoglyph obfuscation variants).
+    if not a.isascii():
+        return ""
+    if _RE_EVM.match(a):
+        return "ethereum"
+    if _RE_TRON.match(a):
+        return "tron"
+    if a.lower().startswith("bc1"):
+        return "bitcoin"
+    chain = _OS_CURRENCY_CHAIN.get((currency or "").strip().upper(), "")
+    # Only keep the currency fallback when the address actually verifies for
+    # that chain (covers BTC/LTC/etc. base58 whose shape we can check).
+    if chain and _address_ok(a, chain):
+        return chain
+    return ""
+
+
+def fetch_opensanctions_crypto(timeout: float = 60.0,
+                               cap: int = 20_000) -> List[Record]:
+    """Pull sanctioned crypto addresses from the OpenSanctions consolidated
+    sanctions dataset (public; aggregates OFAC/EU/UN/UK + more).
+
+    Streams the FollowTheMoney NDJSON and keeps only ``CryptoWallet`` entities,
+    mapping each ``publicKey`` to a verifiable chain. Entity-level sanctioned
+    labels only; no private-individual PII. Fail-soft -> [] if unreachable.
+    """
+    req = urllib.request.Request(
+        _OPENSANCTIONS_FTM,
+        headers={"User-Agent": f"{TOOL_NAME}/{TOOL_VERSION} (+public-data)"})
+    out: List[Record] = []
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            for raw_line in resp:
+                if len(out) >= cap:
+                    break
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    ent = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(ent, dict) or ent.get("schema") != "CryptoWallet":
+                    continue
+                props = ent.get("properties") or {}
+                keys = props.get("publicKey") or []
+                if not isinstance(keys, list):
+                    continue
+                currency = ""
+                cur_list = props.get("currency") or []
+                if isinstance(cur_list, list) and cur_list:
+                    currency = str(cur_list[0])
+                for pk in keys:
+                    addr = str(pk).strip()
+                    if not addr:
+                        continue
+                    chain = _os_chain_for(addr, currency)
+                    if not chain or chain not in CHAINS:
+                        continue
+                    norm = addr.lower() if _RE_EVM.match(addr) else addr
+                    out.append(Record(
+                        address=norm, chain=chain,
+                        entity_name="Sanctioned crypto address (consolidated)",
+                        entity_type="sanctioned", category="sanctioned-entity",
+                        label_source="opensanctions_crypto",
+                        source_url=_OPENSANCTIONS_FTM,
+                        balance_hint=(currency or ""),
+                        notes="Sanctioned digital-currency address from the "
+                              "OpenSanctions consolidated list (OFAC/EU/UN/UK+); "
+                              "entity-level, no private PII.",
+                    ))
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+        return out
     return out
 
 
@@ -994,7 +1298,10 @@ LIVE_FETCHERS = (
     ("uniswap_token_list", fetch_uniswap_token_list),
     ("oneinch_token_lists", fetch_oneinch_token_lists),
     ("trustwallet_assets", fetch_trustwallet_tokens),
+    ("trustwallet_assets_full", fetch_trustwallet_assets),
     ("coingecko_token_lists", fetch_coingecko_token_lists),
+    ("extra_token_lists", fetch_extra_token_lists),
+    ("opensanctions_crypto", fetch_opensanctions_crypto),
     ("defillama_protocols", fetch_defillama_protocols),
 )
 
@@ -1177,7 +1484,12 @@ _RE_B58 = re.compile(r"^[1-9A-HJ-NP-Za-km-z]+$")
 # Chains whose addresses are EVM-shaped (0x + 40 hex).
 _EVM_CHAINS = {"eth", "ethereum", "bsc", "polygon", "arbitrum", "optimism",
                "base", "avalanche", "fantom", "gnosis", "ethereum-classic",
-               "zksync", "cronos", "blast"}
+               "zksync", "cronos", "blast",
+               "celo", "linea", "mantle", "scroll", "moonbeam", "moonriver",
+               "aurora", "metis", "kava", "harmony", "heco", "okc", "kcc",
+               "boba", "fuse", "polygon-zkevm", "core", "sonic", "ronin",
+               "pulsechain", "astar", "dogechain", "manta", "mode", "fraxtal",
+               "rootstock"}
 
 
 def _address_ok(address: str, chain: str) -> bool:

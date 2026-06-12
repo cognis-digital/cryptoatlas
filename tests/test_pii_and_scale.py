@@ -19,6 +19,8 @@ from cryptoatlas.core import (
     fetch_uniswap_token_list, fetch_oneinch_token_lists, fetch_trustwallet_tokens,
     fetch_multichain_explorer_labels, fetch_coingecko_token_lists,
     fetch_defillama_protocols, _parse_scan_labels, _defillama_chain_addr,
+    fetch_extra_token_lists, fetch_trustwallet_assets,
+    fetch_opensanctions_crypto, _os_chain_for, _tw_address_ok,
 )
 
 
@@ -191,6 +193,62 @@ class TestDefillamaAddressParser(unittest.TestCase):
         self.assertEqual(_defillama_chain_addr(""), ("", ""))
 
 
+class TestOpenSanctionsChainMap(unittest.TestCase):
+    """OpenSanctions CryptoWallet -> verifiable cryptoatlas chain mapping."""
+
+    def test_evm_shape_wins(self):
+        # An EVM publicKey is mapped by shape regardless of declared currency.
+        self.assertEqual(_os_chain_for("0x" + "a" * 40, "BSC"), "ethereum")
+
+    def test_tron_shape_wins(self):
+        self.assertEqual(_os_chain_for("T" + "1" * 33, "USDT"), "tron")
+
+    def test_bech32_btc(self):
+        self.assertEqual(_os_chain_for("bc1qabcdefghijklmnop", "BTC"), "bitcoin")
+
+    def test_currency_fallback(self):
+        self.assertEqual(_os_chain_for("Ltc1exampleaddr", "LTC"), "litecoin")
+        self.assertEqual(_os_chain_for("Xexampleaddr", "XMR"), "monero")
+
+    def test_unmappable_returns_empty(self):
+        self.assertEqual(_os_chain_for("someaddr", "NOSUCH"), "")
+
+
+class TestTrustWalletAddressGuard(unittest.TestCase):
+    """The Trust Wallet asset-dir guard accepts only verifiable on-chain addrs."""
+
+    def test_evm_ok(self):
+        self.assertTrue(_tw_address_ok("0x" + "a" * 40, "ethereum"))
+        self.assertTrue(_tw_address_ok("0x" + "b" * 40, "linea"))
+
+    def test_solana_ok(self):
+        self.assertTrue(_tw_address_ok("So11111111111111111111111111111111111111112",
+                                       "solana"))
+
+    def test_tron_ok(self):
+        self.assertTrue(_tw_address_ok("T" + "1" * 33, "tron"))
+
+    def test_malformed_rejected(self):
+        self.assertFalse(_tw_address_ok("0xshort", "ethereum"))
+        self.assertFalse(_tw_address_ok("0x" + "a" * 40, "cosmos"))  # unknown chain
+
+
+class TestNewSourcesRegistered(unittest.TestCase):
+    def test_new_sources_in_catalog_and_registry(self):
+        ids = {s["id"] for s in source_catalog()}
+        for want in ("trustwallet_assets_full", "extra_token_lists",
+                     "opensanctions_crypto"):
+            self.assertIn(want, ids)
+        reg = {sid for sid, _ in LIVE_FETCHERS}
+        for want in ("trustwallet_assets_full", "extra_token_lists",
+                     "opensanctions_crypto"):
+            self.assertIn(want, reg)
+
+    def test_new_chains_present(self):
+        for c in ("celo", "linea", "mantle", "scroll", "dogecoin"):
+            self.assertIn(c, CHAINS)
+
+
 class TestFetchersFailSoft(unittest.TestCase):
     """Every live fetcher must return a list (never raise), online or offline."""
 
@@ -198,7 +256,9 @@ class TestFetchersFailSoft(unittest.TestCase):
         for fn in (fetch_ofac_sdn_mirror, fetch_etherscan_labels,
                    fetch_uniswap_token_list, fetch_oneinch_token_lists,
                    fetch_trustwallet_tokens, fetch_multichain_explorer_labels,
-                   fetch_coingecko_token_lists, fetch_defillama_protocols):
+                   fetch_coingecko_token_lists, fetch_defillama_protocols,
+                   fetch_extra_token_lists, fetch_trustwallet_assets,
+                   fetch_opensanctions_crypto):
             self.assertIsInstance(fn(timeout=0.001), list)
 
 

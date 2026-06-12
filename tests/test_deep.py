@@ -37,7 +37,7 @@ class TestValidation(unittest.TestCase):
 
     def test_rejects_unknown_chain(self):
         with self.assertRaises(IngestError):
-            validate(_valid_rec(chain="dogecoin"))
+            validate(_valid_rec(chain="notachain"))
 
     def test_rejects_unknown_category(self):
         with self.assertRaises(IngestError):
