@@ -43,17 +43,21 @@ DEFAULT_DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 ENTITY_TYPES = (
     "exchange", "fund", "etf", "treasury", "government",
     "seizure", "reserve", "whale", "sanctioned", "mixer", "service",
+    "contract", "protocol", "token", "bridge",
 )
 
 CATEGORIES = (
     "cex", "defi", "etf-spot", "public-company", "nation-state",
     "law-enforcement", "strategic-reserve", "labeled-cluster",
     "sanctioned-entity", "infrastructure",
+    "token-contract", "defi-protocol", "bridge-contract",
 )
 
 CHAINS = (
     "bitcoin", "ethereum", "tron", "solana", "litecoin",
     "bitcoin-cash", "ripple", "polygon", "arbitrum", "multi",
+    "bsc", "optimism", "base", "avalanche", "fantom", "gnosis",
+    "ethereum-classic", "monero", "zcash", "dash", "verge",
 )
 
 
@@ -94,8 +98,44 @@ class IngestError(Exception):
     """Raised when a record fails validation before insertion."""
 
 
+# PII guardrails (entity-level public data ONLY; reject anything that looks like
+# a private real-world identity attached to an address).
+_RE_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_RE_PHONE = re.compile(r"(?<!\w)(?:\+?\d[\d ().-]{7,}\d)(?!\w)")
+_RE_SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+# "John Smith" / "Jane A. Doe" shaped personal names used as the *entity*.
+_RE_PERSONAL_NAME = re.compile(r"^[A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+$")
+# Tokens that signal a private individual rather than a public org/entity.
+_PII_HINTS = ("home address", "personal address", "date of birth", "passport",
+              "national id", "ssn", "private individual", "private person",
+              "private wallet of")
+
+
+def _looks_like_pii(*fields: str) -> Optional[str]:
+    """Return a reason string if any field carries private-person PII, else None."""
+    for f in fields:
+        if not f:
+            continue
+        if _RE_EMAIL.search(f):
+            return "email address detected"
+        if _RE_SSN.search(f):
+            return "government id (SSN) detected"
+        if _RE_PHONE.search(f):
+            return "phone number detected"
+        low = f.lower()
+        for hint in _PII_HINTS:
+            if hint in low:
+                return f"private-PII marker detected: {hint!r}"
+    return None
+
+
 def validate(rec: Record) -> Record:
-    """Validate a record against the schema. Raises IngestError on violation."""
+    """Validate a record against the schema. Raises IngestError on violation.
+
+    Enforces the hard scope: PUBLIC, entity-level only. Any record that looks
+    like private-individual PII (email/phone/gov-id, a personal-name entity, or
+    a PII marker phrase in any field) is rejected.
+    """
     if not rec.entity_name or not rec.entity_name.strip():
         raise IngestError("entity_name is required")
     if rec.entity_type not in ENTITY_TYPES:
@@ -108,6 +148,27 @@ def validate(rec: Record) -> Record:
         raise IngestError("source_url must be a real public URL")
     if rec.is_synthetic:  # pragma: no cover - guardrail
         raise IngestError("synthetic rows are not permitted in cryptoatlas")
+
+    # No-PII guardrail across all human-readable fields.
+    reason = _looks_like_pii(rec.entity_name, rec.notes, rec.balance_hint, rec.label_source)
+    if reason:
+        raise IngestError(f"record rejected (no private PII): {reason}")
+    # Deanonymization guard: a private individual's full name tied to a concrete
+    # on-chain address is a real-world identity link — reject. (A bare org/entity
+    # name with no address, or with an org suffix, is fine; this only fires when a
+    # FirstName LastName pattern is bound to an actual address.)
+    name = rec.entity_name.strip()
+    has_org_suffix = bool(re.search(
+        r"\b(inc|llc|ltd|corp|trust|fund|capital|labs?|exchange|dao|protocol|"
+        r"foundation|group|holdings|ventures|partners|gmbh|sa|ag|plc|government|"
+        r"treasury|bridge|finance|network|token|swap|wallet|sdn|trading|markets?|"
+        r"systems?|technolog\w*|digital|global|custody|securities|bank|reserve)\b",
+        name, re.I))
+    if rec.address and not has_org_suffix and _RE_PERSONAL_NAME.match(name):
+        raise IngestError("entity_name looks like a private individual's name tied "
+                          "to an address; cryptoatlas is entity-level public data "
+                          "only (no deanonymization)")
+
     # Address may be empty (entity-level disclosure without a single address),
     # but if present it must look like an on-chain identifier, not PII.
     if rec.address:
@@ -237,6 +298,56 @@ SOURCE_CATALOG: List[Dict[str, str]] = [
         "type": "reserve",
         "notes": "Government strategic-reserve announcements and disclosed holdings.",
     },
+    # --- Scale sources (verified fetchable; full multi-chain public label sets) ---
+    {
+        "id": "ofac_sdn_mirror",
+        "name": "OFAC SDN sanctioned digital-currency addresses (per-chain mirror)",
+        "url": "https://github.com/0xB10C/ofac-sanctioned-digital-currency-addresses",
+        "type": "sanctioned",
+        "notes": "Public per-chain extraction of every OFAC SDN 'Digital Currency "
+                 "Address' (ARB/BCH/BSC/DASH/ETC/ETH/LTC/SOL/TRX/USDC/USDT/XBT/XMR/"
+                 "XRP/XVG/ZEC). Authoritative SDN content, machine-readable.",
+    },
+    {
+        "id": "etherscan_labels",
+        "name": "Etherscan public address labels (combined)",
+        "url": "https://github.com/brianleect/etherscan-labels",
+        "type": "service",
+        "notes": "~30k Ethereum addresses each carrying a PUBLIC Etherscan entity/"
+                 "protocol/contract label (exchanges, DEXes, protocols, bridges, "
+                 "contracts). Address->entity mapping only; no private PII.",
+    },
+    {
+        "id": "uniswap_token_list",
+        "name": "Uniswap default token list (issuer-labeled contracts)",
+        "url": "https://tokens.uniswap.org/",
+        "type": "token",
+        "notes": "Canonical token-contract list: each ERC-20 contract address is "
+                 "mapped to its public issuer/project name and chain.",
+    },
+    {
+        "id": "oneinch_token_lists",
+        "name": "1inch multi-chain token lists",
+        "url": "https://tokens.1inch.io/",
+        "type": "token",
+        "notes": "Per-chain token-contract->issuer maps for Ethereum, BSC, Polygon, "
+                 "Arbitrum, Optimism. Entity-level contract labels.",
+    },
+    {
+        "id": "trustwallet_assets",
+        "name": "Trust Wallet assets token lists",
+        "url": "https://github.com/trustwallet/assets",
+        "type": "token",
+        "notes": "Community-maintained multi-chain token-contract registry with "
+                 "issuer names; public, entity/contract-level.",
+    },
+    {
+        "id": "defi_bridge_contracts",
+        "name": "Public cross-chain bridge contract labels",
+        "url": "https://github.com/etherscan-labels/etherscan-labels",
+        "type": "bridge",
+        "notes": "Labeled bridge/protocol contract addresses from public label sets.",
+    },
 ]
 
 
@@ -249,7 +360,7 @@ SOURCE_CATALOG: List[Dict[str, str]] = [
 SEED_RECORDS: List[Dict[str, str]] = [
     # --- Sanctioned (OFAC SDN, public) ---
     {
-        "address": "1Q9UAQHFQPLEUSGTBHGEUH7DERZWQ3QQ8E".lower(),
+        "address": "12QtD5BFwRsdNsAZY76UVE1xyCGNTojH9h",
         "chain": "bitcoin", "entity_name": "OFAC SDN listed address (sample)",
         "entity_type": "sanctioned", "category": "sanctioned-entity",
         "label_source": "ofac_sdn_crypto",
@@ -450,6 +561,258 @@ def fetch_ofac_sdn(timeout: float = 8.0) -> List[Record]:
     return out
 
 
+def _http_get_json(url: str, timeout: float = 20.0) -> Optional[Any]:
+    raw = _http_get(url, timeout=timeout)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw.decode("utf-8", errors="replace"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+# Per-chain ticker -> (chain id, on-chain shape) used by the OFAC mirror feed.
+_OFAC_MIRROR_BASE = ("https://raw.githubusercontent.com/0xB10C/"
+                     "ofac-sanctioned-digital-currency-addresses/lists/"
+                     "sanctioned_addresses_{tk}.txt")
+_OFAC_MIRROR_CHAINS = {
+    "ARB": "arbitrum", "BCH": "bitcoin-cash", "BSC": "bsc", "DASH": "dash",
+    "ETC": "ethereum-classic", "ETH": "ethereum", "LTC": "litecoin",
+    "SOL": "solana", "TRX": "tron", "USDC": "ethereum", "USDT": "ethereum",
+    "XBT": "bitcoin", "XMR": "monero", "XRP": "ripple", "XVG": "verge",
+    "ZEC": "zcash",
+}
+# Stablecoin tickers span multiple underlying chains in the OFAC feed; infer the
+# chain from the address shape rather than hard-assigning.
+_STABLECOIN_TICKERS = {"USDC", "USDT"}
+
+
+def _infer_chain_from_address(addr: str, default: str) -> str:
+    """Override the ticker default ONLY on an unambiguous address shape.
+
+    EVM (0x + 40 hex) and TRON (T + 33 base58, 34 chars total) are unmistakable;
+    everything else keeps the ticker's declared chain (BTC/LTC/DASH/etc. share
+    overlapping base58 prefixes, so we do not guess between them)."""
+    a = (addr or "").strip()
+    if a.startswith("0x") and len(a) == 42:
+        return "ethereum"
+    if a.startswith("T") and len(a) == 34:
+        return "tron"
+    if default == "bitcoin" and a.lower().startswith("bc1"):
+        return "bitcoin"
+    # Stablecoins are issued cross-chain. An Omni-layer USDT address is a
+    # Bitcoin P2PKH/P2SH base58 (1.../3...) — route it to bitcoin so it verifies.
+    if default == "ethereum" and a[:1] in ("1", "3") and _RE_BTC_B58.match(a):
+        return "bitcoin"
+    return default
+
+
+def fetch_ofac_sdn_mirror(timeout: float = 20.0,
+                          cap: int = 50_000) -> List[Record]:
+    """Pull the full per-chain OFAC SDN crypto-address mirror (public).
+
+    Covers every chain OFAC has ever listed a Digital Currency Address on.
+    Returns [] if unreachable. Authoritative SDN content, machine-readable.
+    """
+    out: List[Record] = []
+    for tk, chain in _OFAC_MIRROR_CHAINS.items():
+        url = _OFAC_MIRROR_BASE.format(tk=tk)
+        raw = _http_get(url, timeout=timeout)
+        if not raw:
+            continue
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            addr = line.strip()
+            if not addr or addr.startswith("#"):
+                continue
+            # Only EVM (0x) addresses are case-insensitive; base58 (BTC/TRON/etc.)
+            # is case-SENSITIVE and must be preserved verbatim.
+            norm = addr.lower() if addr.startswith("0x") else addr
+            # OFAC sometimes cross-lists an address under a ticker whose native
+            # address shape it does not match (esp. stablecoins, and the
+            # occasional XBT/ETH mislabel). Infer the chain from the address
+            # surface; fall back to the ticker's default only when ambiguous.
+            row_chain = _infer_chain_from_address(addr, chain)
+            out.append(Record(
+                address=norm, chain=row_chain,
+                entity_name=f"OFAC SDN sanctioned address ({tk})",
+                entity_type="sanctioned", category="sanctioned-entity",
+                label_source="ofac_sdn_mirror", source_url=url,
+                notes=f"OFAC SDN Digital Currency Address ({tk}); public mirror.",
+            ))
+            if len(out) >= cap:
+                return out
+    return out
+
+
+# Public labels that denote market-makers / funds (entity-level, not PII).
+_FUND_LABEL_HINTS = ("market maker", "wintermute", "jump", "alameda",
+                     "amber", "cumberland", "fund", "capital", "ventures")
+_EXCHANGE_LABEL_HINTS = ("binance", "coinbase", "kraken", "okx", "okex",
+                         "huobi", "bitfinex", "kucoin", "bybit", "gate.io",
+                         "gemini", "bitstamp", "crypto.com", "exchange",
+                         "deposit", "hot wallet", "cold wallet")
+_BRIDGE_LABEL_HINTS = ("bridge", "wormhole", "across", "hop", "celer",
+                       "synapse", "stargate", "portal")
+_MIXER_LABEL_HINTS = ("tornado", "mixer", "tumbler", "blender")
+
+
+def _classify_label(name: str, labels: List[str]) -> Tuple[str, str]:
+    """Map a public Etherscan-style label to (entity_type, category).
+
+    Defaults to ('contract', 'labeled-cluster') — a public on-chain contract
+    label, never a private identity.
+    """
+    blob = (name + " " + " ".join(labels)).lower()
+    if any(h in blob for h in _MIXER_LABEL_HINTS):
+        return "mixer", "sanctioned-entity"
+    if any(h in blob for h in _EXCHANGE_LABEL_HINTS):
+        return "exchange", "cex"
+    if any(h in blob for h in _BRIDGE_LABEL_HINTS):
+        return "bridge", "bridge-contract"
+    if any(h in blob for h in _FUND_LABEL_HINTS):
+        return "fund", "labeled-cluster"
+    return "contract", "labeled-cluster"
+
+
+def fetch_etherscan_labels(timeout: float = 30.0,
+                           cap: int = 60_000) -> List[Record]:
+    """Pull the public Etherscan combined-labels set (~30k labeled addresses).
+
+    Each address carries a PUBLIC entity/protocol/contract label. Address->entity
+    mapping only — no private-individual PII. Returns [] if unreachable.
+    """
+    url = ("https://raw.githubusercontent.com/brianleect/etherscan-labels/"
+           "main/data/etherscan/combined/combinedAllLabels.json")
+    data = _http_get_json(url, timeout=timeout)
+    if not isinstance(data, dict):
+        return []
+    out: List[Record] = []
+    for addr, info in data.items():
+        if not isinstance(info, dict):
+            continue
+        a = (addr or "").strip().lower()
+        if not (a.startswith("0x") and len(a) == 42):
+            continue
+        name = (info.get("name") or "").strip()
+        labels = info.get("labels") or []
+        if not name:
+            name = (labels[0] if labels else "").strip()
+        if not name:
+            continue
+        etype, cat = _classify_label(name, labels if isinstance(labels, list) else [])
+        out.append(Record(
+            address=a, chain="ethereum", entity_name=name,
+            entity_type=etype, category=cat,
+            label_source="etherscan_labels", source_url=url,
+            notes="Public Etherscan label" + (
+                f" [{', '.join(labels[:4])}]" if labels else ""),
+        ))
+        if len(out) >= cap:
+            break
+    return out
+
+
+# chainId -> cryptoatlas chain name for token-list ingestion.
+_EVM_CHAIN_BY_ID = {
+    1: "ethereum", 10: "optimism", 56: "bsc", 137: "polygon",
+    250: "fantom", 8453: "base", 42161: "arbitrum", 43114: "avalanche",
+    100: "gnosis",
+}
+
+
+def _ingest_token_list(tokens: List[Dict[str, Any]], source_id: str, url: str,
+                       default_chain: str, cap: int) -> List[Record]:
+    out: List[Record] = []
+    for t in tokens:
+        if not isinstance(t, dict):
+            continue
+        addr = (t.get("address") or "").strip().lower()
+        if not (addr.startswith("0x") and len(addr) == 42):
+            continue
+        name = (t.get("name") or t.get("symbol") or "").strip()
+        if not name:
+            continue
+        chain = _EVM_CHAIN_BY_ID.get(t.get("chainId"), default_chain)
+        if chain not in CHAINS:
+            chain = default_chain
+        out.append(Record(
+            address=addr, chain=chain, entity_name=name,
+            entity_type="token", category="token-contract",
+            label_source=source_id, source_url=url,
+            balance_hint=(t.get("symbol") or ""),
+            notes="Token-contract issuer label from a public token list.",
+        ))
+        if len(out) >= cap:
+            break
+    return out
+
+
+def fetch_uniswap_token_list(timeout: float = 25.0, cap: int = 20_000) -> List[Record]:
+    """Pull the canonical Uniswap default token list (issuer-labeled contracts)."""
+    url = "https://tokens.uniswap.org/"
+    data = _http_get_json(url, timeout=timeout)
+    toks = data.get("tokens") if isinstance(data, dict) else None
+    if not isinstance(toks, list):
+        return []
+    return _ingest_token_list(toks, "uniswap_token_list", url, "ethereum", cap)
+
+
+def fetch_oneinch_token_lists(timeout: float = 25.0,
+                              cap: int = 30_000) -> List[Record]:
+    """Pull 1inch per-chain token-contract lists across EVM chains."""
+    out: List[Record] = []
+    for cid, chain in _EVM_CHAIN_BY_ID.items():
+        url = f"https://tokens.1inch.io/v1.2/{cid}"
+        data = _http_get_json(url, timeout=timeout)
+        if not isinstance(data, dict):
+            continue
+        # 1inch returns {address: {name, symbol, ...}}
+        toks = []
+        for addr, meta in data.items():
+            if isinstance(meta, dict):
+                m = dict(meta)
+                m.setdefault("address", addr)
+                m.setdefault("chainId", cid)
+                toks.append(m)
+        out.extend(_ingest_token_list(toks, "oneinch_token_lists", url, chain,
+                                      cap - len(out)))
+        if len(out) >= cap:
+            break
+    return out
+
+
+def fetch_trustwallet_tokens(timeout: float = 25.0,
+                             cap: int = 20_000) -> List[Record]:
+    """Pull Trust Wallet multi-chain token lists (issuer-labeled contracts)."""
+    out: List[Record] = []
+    chains = {"ethereum": "ethereum", "smartchain": "bsc", "polygon": "polygon",
+              "arbitrum": "arbitrum", "optimism": "optimism",
+              "avalanchec": "avalanche", "base": "base"}
+    for slug, chain in chains.items():
+        url = (f"https://raw.githubusercontent.com/trustwallet/assets/master/"
+               f"blockchains/{slug}/tokenlist.json")
+        data = _http_get_json(url, timeout=timeout)
+        toks = data.get("tokens") if isinstance(data, dict) else None
+        if not isinstance(toks, list):
+            continue
+        out.extend(_ingest_token_list(toks, "trustwallet_assets", url, chain,
+                                      cap - len(out)))
+        if len(out) >= cap:
+            break
+    return out
+
+
+# Registry of live scale-fetchers. Each returns a list of Records (never raises).
+LIVE_FETCHERS = (
+    ("ofac_sdn_crypto", fetch_ofac_sdn),
+    ("ofac_sdn_mirror", fetch_ofac_sdn_mirror),
+    ("etherscan_labels", fetch_etherscan_labels),
+    ("uniswap_token_list", fetch_uniswap_token_list),
+    ("oneinch_token_lists", fetch_oneinch_token_lists),
+    ("trustwallet_assets", fetch_trustwallet_tokens),
+)
+
+
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -489,9 +852,11 @@ def build(db_path: str = DEFAULT_DB, live: bool = True,
     """Run the ingestion/enrichment pipeline.
 
     1. Ingest the attributed PUBLIC seed (always).
-    2. If ``live``, attempt to fetch live public sources (OFAC SDN). Each row
-       carries its real source_url. Live failures are non-fatal — we report,
-       never fabricate.
+    2. If ``live``, fetch every registered public scale-source in turn
+       (OFAC SDN + per-chain mirror, Etherscan public labels, multi-chain
+       token-contract lists). Each row carries its real ``source_url`` and is
+       validated/deduped on insert. Any source that is unreachable is reported,
+       never fabricated — the build reports the HONEST count.
     """
     conn = connect(db_path)
     stats = IngestStats()
@@ -499,15 +864,22 @@ def build(db_path: str = DEFAULT_DB, live: bool = True,
         # 1. Seed (always available, fully attributed).
         _ingest_records(conn, SEED_RECORDS, stats)
 
-        # 2. Live public sources (best-effort).
+        # 2. Live public sources (best-effort, per-source fail-soft).
         if live:
-            ofac = fetch_ofac_sdn(timeout=timeout)
-            if ofac:
-                stats.live_fetched += len(ofac)
-                _ingest_records(conn, ofac, stats)
-            else:
-                stats.errors.append("ofac_sdn_crypto: live fetch unavailable in this "
-                                    "environment (offline/blocked); seed retained.")
+            for source_id, fetcher in LIVE_FETCHERS:
+                try:
+                    recs = fetcher(timeout=timeout)
+                except Exception as exc:  # pragma: no cover - defensive
+                    recs = []
+                    stats.errors.append(f"{source_id}: fetch error ({exc!r}); skipped.")
+                if recs:
+                    stats.live_fetched += len(recs)
+                    _ingest_records(conn, recs, stats)
+                    conn.commit()
+                else:
+                    stats.errors.append(
+                        f"{source_id}: live fetch unavailable in this environment "
+                        "(offline/blocked/empty); no rows fabricated.")
         conn.commit()
     finally:
         conn.close()
@@ -616,6 +988,11 @@ _RE_TRON = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
 _RE_B58 = re.compile(r"^[1-9A-HJ-NP-Za-km-z]+$")
 
 
+# Chains whose addresses are EVM-shaped (0x + 40 hex).
+_EVM_CHAINS = {"eth", "ethereum", "bsc", "polygon", "arbitrum", "optimism",
+               "base", "avalanche", "fantom", "gnosis", "ethereum-classic"}
+
+
 def _address_ok(address: str, chain: str) -> bool:
     """Heuristic per-chain address validation. Empty address is allowed
     (entity-level rows). Unknown chains are not failed."""
@@ -623,13 +1000,13 @@ def _address_ok(address: str, chain: str) -> bool:
     c = (chain or "").strip().lower()
     if not a:
         return True
-    if c == "btc":
+    if c in ("btc", "bitcoin"):
         return bool(_RE_BTC_B58.match(a) or _RE_BTC_BECH32.match(a))
-    if c in ("eth", "bsc"):
+    if c in _EVM_CHAINS:
         return bool(_RE_EVM.match(a))
-    if c == "tron":
+    if c in ("tron",):
         return bool(_RE_TRON.match(a))
-    if c == "sol":
+    if c in ("sol", "solana"):
         return bool(_RE_B58.match(a)) and 32 <= len(a) <= 44
     return True
 

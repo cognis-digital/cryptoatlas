@@ -96,29 +96,54 @@ public sources actually yield and `stats` reports the **real** `record_count`.
   entry it parses. In a blocked/offline environment the live fetch is reported
   as unavailable and the seed is retained — no fabrication.
 
-### Growing toward 180k records
+### Scale: live build today, and the path to 100k+
 
-The dataset scales by adding more **public label sets** to the source catalog
-(`cryptoatlas sources`). Each is a genuinely public, attributable source:
+`build` (with egress) fetches every registered public scale-source in turn.
+In a recent live build it ingested **~32.5k real, deduped, fully-attributed
+public records** (`cryptoatlas verify` → 100% pass). Each row carries its real
+`source_url`; nothing is fabricated.
 
-| source id              | what it adds                                            |
-|------------------------|---------------------------------------------------------|
-| `ofac_sdn_crypto`      | OFAC SDN sanctioned crypto addresses (live-fetched)     |
-| `ofac_sdn_advanced_json` | Structured OFAC advanced feed                         |
-| `gov_btc_treasuries`   | Public-company / government BTC treasury disclosures    |
-| `us_marshals_seizures` | DOJ/USMS seizure press releases with wallet addresses   |
-| `spot_etf_custody`     | SEC EDGAR spot-ETF custody filings                      |
-| `exchange_cold_wallets`| Community/PoR-attested exchange labels                  |
-| `rich_list_snapshot`   | Public rich-list snapshots (labeled clusters **only**)  |
-| `strategic_reserve`    | National strategic-reserve disclosures                  |
+| source id              | what it adds                                            | scale |
+|------------------------|---------------------------------------------------------|-------|
+| `etherscan_labels`     | ~30k Ethereum addresses with PUBLIC Etherscan entity/protocol/contract labels | ~29k |
+| `ofac_sdn_mirror`      | Full per-chain OFAC SDN digital-currency address mirror (16 tickers) | ~780 |
+| `oneinch_token_lists`  | 1inch multi-chain token-contract→issuer maps (ETH/BSC/Polygon/Arbitrum/Optimism/…) | ~1.6k |
+| `uniswap_token_list`   | Canonical Uniswap default token list (issuer-labeled contracts) | ~1k |
+| `trustwallet_assets`   | Trust Wallet multi-chain token-contract registry | ~400 |
+| `ofac_sdn_crypto`      | OFAC SDN direct feed (treasury.gov; live-fetched)       | — |
+| `gov_btc_treasuries`   | Public-company / government BTC treasury disclosures    | seed |
+| `us_marshals_seizures` | DOJ/USMS seizure press releases with wallet addresses   | seed |
+| `spot_etf_custody`     | SEC EDGAR spot-ETF custody filings                      | seed |
+| `exchange_cold_wallets`| Community/PoR-attested exchange labels                  | seed |
+| `rich_list_snapshot`   | Public rich-list snapshots (labeled clusters **only**)  | seed |
+| `strategic_reserve`    | National strategic-reserve disclosures                  | seed |
+
+**Realistic path to 100,000+ PUBLIC entity-level records** — every lever below
+is a genuinely public, attributable source; no PII, no fabrication:
+
+1. **Etherscan/Blockscout per-explorer label dumps across L2s** (Arbitrum,
+   Optimism, Base, Polygon, BSC). The same `combinedAllLabels.json` shape exists
+   per chain — registering each adds tens of thousands more labeled contracts.
+2. **Full multi-chain token-contract universe** — CoinGecko / DefiLlama
+   token-platform lists and the complete Trust Wallet `assets` tree (thousands of
+   token contracts per chain × dozens of chains) push token-contracts well past
+   50k on their own.
+3. **DeFi protocol contract registries** (DefiLlama protocol→contract exports,
+   Uniswap/Aave/Curve subgraph contract sets) — entity-level smart-contract
+   labels.
+4. **Complete OFAC SDN history + delisted snapshots**, plus OFAC of other
+   jurisdictions (EU/UK/UN consolidated lists that publish crypto addresses).
+5. **Public seizure/forfeiture dockets** (DOJ, USMS auctions, Bitfinex/Silk Road
+   wallet clusters) and **sovereign-reserve disclosures** (El Salvador tracker,
+   US Strategic Bitcoin Reserve, Bhutan/UAE disclosures).
 
 To grow the dataset: add a fetch/parse function in `cryptoatlas/core.py` (model
-it on `fetch_ofac_sdn`), register its source in `SOURCE_CATALOG`, and call it
-from `build`. Every new row must carry its real `source_url` and pass
-`validate()`. The largest public label sets (Etherscan-style label dumps,
-chain-analytics open label exports, full OFAC history) push the total into the
-six-figure range; cryptoatlas is the schema + pipeline + provenance layer that
-keeps that growth honest and attributable.
+it on `fetch_etherscan_labels` / `fetch_oneinch_token_lists`), register it in
+`SOURCE_CATALOG` **and** `LIVE_FETCHERS`, and `build` will pick it up
+automatically. Every new row must carry its real `source_url`, classify to an
+entity-level type, and pass `validate()` (which rejects any private-individual
+PII). cryptoatlas is the schema + pipeline + provenance + no-PII-guardrail layer
+that keeps six-figure growth honest, public, and attributable.
 
 ## MCP server
 

@@ -1,0 +1,154 @@
+"""PII-rejection guardrails + scale-pipeline tests for cryptoatlas.
+
+These tests are NETWORK-FREE: they validate the no-private-PII policy and the
+structure of the expanded source catalog / fetcher registry without requiring
+egress. The live fetchers themselves are exercised in test_deep's
+"returns a list either way" pattern.
+"""
+
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from cryptoatlas.core import (
+    Record, IngestError, validate, source_catalog, LIVE_FETCHERS,
+    _classify_label, _ingest_token_list, _looks_like_pii, ENTITY_TYPES,
+    CATEGORIES, CHAINS, fetch_ofac_sdn_mirror, fetch_etherscan_labels,
+    fetch_uniswap_token_list, fetch_oneinch_token_lists, fetch_trustwallet_tokens,
+)
+
+
+def _rec(**kw):
+    base = dict(address="0x71660c4005ba85c37ccec55d0c4493e66fe775d3",
+                chain="ethereum", entity_name="Acme Exchange",
+                entity_type="exchange", category="cex",
+                source_url="https://example.com/proof")
+    base.update(kw)
+    return Record(**base)
+
+
+class TestPiiRejection(unittest.TestCase):
+    def test_email_in_entity_name_rejected(self):
+        with self.assertRaises(IngestError):
+            validate(_rec(entity_name="alice.private@gmail.com"))
+
+    def test_email_in_notes_rejected(self):
+        with self.assertRaises(IngestError):
+            validate(_rec(notes="owner contact: bob@hotmail.com"))
+
+    def test_phone_number_rejected(self):
+        with self.assertRaises(IngestError):
+            validate(_rec(notes="call the holder at +1 (415) 555-0199"))
+
+    def test_ssn_rejected(self):
+        with self.assertRaises(IngestError):
+            validate(_rec(notes="taxpayer 123-45-6789"))
+
+    def test_pii_marker_phrase_rejected(self):
+        with self.assertRaises(IngestError):
+            validate(_rec(notes="this is the private wallet of a retail user"))
+        with self.assertRaises(IngestError):
+            validate(_rec(balance_hint="home address on file"))
+
+    def test_personal_name_tied_to_address_rejected(self):
+        # First Last bound to a concrete address = deanonymization -> reject.
+        with self.assertRaises(IngestError):
+            validate(_rec(entity_name="John Smith"))
+        with self.assertRaises(IngestError):
+            validate(_rec(entity_name="Jane A. Doe"))
+
+    def test_org_name_with_suffix_allowed(self):
+        # An org/entity name (even two-word) is fine — it's public, entity-level.
+        validate(_rec(entity_name="Block Inc"))
+        validate(_rec(entity_name="Wintermute Trading"))
+        validate(_rec(entity_name="Coinbase Custody"))
+
+    def test_personal_name_without_address_allowed(self):
+        # No address bound -> no real-world deanonymization link.
+        validate(_rec(address="", entity_type="government",
+                      category="nation-state", entity_name="John Smith"))
+
+    def test_helper_detects_pii(self):
+        self.assertIsNotNone(_looks_like_pii("x@y.com"))
+        self.assertIsNotNone(_looks_like_pii("ssn 111-22-3333"))
+        self.assertIsNone(_looks_like_pii("Binance hot wallet"))
+
+
+class TestExpandedCatalog(unittest.TestCase):
+    def test_catalog_grew(self):
+        cat = source_catalog()
+        self.assertGreaterEqual(len(cat), 12)
+        ids = {s["id"] for s in cat}
+        for want in ("ofac_sdn_mirror", "etherscan_labels", "uniswap_token_list",
+                     "oneinch_token_lists", "trustwallet_assets"):
+            self.assertIn(want, ids)
+
+    def test_catalog_types_valid_and_attributed(self):
+        for s in source_catalog():
+            self.assertTrue(s["url"].startswith("http"))
+            self.assertIn(s["type"], ENTITY_TYPES)
+
+    def test_live_fetcher_registry(self):
+        self.assertGreaterEqual(len(LIVE_FETCHERS), 6)
+        for source_id, fn in LIVE_FETCHERS:
+            self.assertTrue(callable(fn))
+            self.assertIsInstance(source_id, str)
+
+
+class TestClassification(unittest.TestCase):
+    def test_exchange_classified(self):
+        self.assertEqual(_classify_label("Binance: Hot Wallet", ["binance"]),
+                         ("exchange", "cex"))
+
+    def test_mixer_classified(self):
+        et, cat = _classify_label("Tornado Cash", ["tornado-cash"])
+        self.assertEqual((et, cat), ("mixer", "sanctioned-entity"))
+
+    def test_bridge_classified(self):
+        et, cat = _classify_label("Wormhole Bridge", ["bridge"])
+        self.assertEqual((et, cat), ("bridge", "bridge-contract"))
+
+    def test_default_is_contract_not_pii(self):
+        et, cat = _classify_label("Some Random Contract", ["take-action"])
+        self.assertEqual(et, "contract")
+        self.assertIn(et, ENTITY_TYPES)
+
+
+class TestTokenListNormalization(unittest.TestCase):
+    def test_ingest_token_list_maps_chain_and_entity(self):
+        toks = [
+            {"chainId": 1, "address": "0x" + "a" * 40, "name": "TokenA", "symbol": "TKA"},
+            {"chainId": 137, "address": "0x" + "b" * 40, "name": "TokenB", "symbol": "TKB"},
+            {"chainId": 1, "address": "not-an-address", "name": "Bad"},  # skipped
+        ]
+        recs = _ingest_token_list(toks, "uniswap_token_list",
+                                  "https://tokens.uniswap.org/", "ethereum", 100)
+        self.assertEqual(len(recs), 2)
+        self.assertEqual(recs[0].chain, "ethereum")
+        self.assertEqual(recs[1].chain, "polygon")
+        for r in recs:
+            self.assertEqual(r.entity_type, "token")
+            self.assertEqual(r.category, "token-contract")
+            validate(r)  # must pass the no-PII validator
+
+    def test_cap_respected(self):
+        toks = [{"chainId": 1, "address": "0x" + f"{i:040x}", "name": f"T{i}"}
+                for i in range(50)]
+        recs = _ingest_token_list(toks, "x", "https://x/", "ethereum", 10)
+        self.assertEqual(len(recs), 10)
+
+
+class TestFetchersFailSoft(unittest.TestCase):
+    """Every live fetcher must return a list (never raise), online or offline."""
+
+    def test_all_return_lists(self):
+        for fn in (fetch_ofac_sdn_mirror, fetch_etherscan_labels,
+                   fetch_uniswap_token_list, fetch_oneinch_token_lists,
+                   fetch_trustwallet_tokens):
+            self.assertIsInstance(fn(timeout=0.001), list)
+
+
+if __name__ == "__main__":
+    unittest.main()
