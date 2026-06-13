@@ -11,6 +11,31 @@ MCP server.
 
 ---
 
+## Usage — step by step
+
+1. **Install** from source (Python 3.9+; SQLite-backed):
+   ```bash
+   pip install .
+   ```
+2. **Build** the dataset (ingestion/enrichment; use `--offline` for bundled-only):
+   ```bash
+   cryptoatlas build --offline --json
+   ```
+3. **Inspect** what was ingested:
+   ```bash
+   cryptoatlas stats --json
+   ```
+4. **Query** by entity name or on-chain address:
+   ```bash
+   cryptoatlas query Coinbase --limit 100 --json
+   ```
+5. **Verify & export / automate** for a pipeline (validates every record has a real http(s) source):
+   ```bash
+   cryptoatlas verify --json
+   cryptoatlas export --format graphml --out atlas.graphml
+   ```
+   Also: `cryptoatlas sources` and `cryptoatlas mcp`. Use `--db PATH` for a custom database.
+
 ## Scope and ethics (read this first)
 
 cryptoatlas is **PUBLIC, entity-level data only**:
