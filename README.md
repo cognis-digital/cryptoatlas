@@ -30,6 +30,16 @@ is always `false` (the pipeline never fabricates rows — see *Honesty* below).
 
 ---
 
+<!-- cognis:domains:start -->
+## Domains
+
+**Primary domain:** Finance & Quant  ·  **JTF MERIDIAN division:** BLACKBOOK · ORACLE
+
+**Topics:** `cognis` `finance` `fintech` `quant` `crypto`
+
+Part of the **Cognis Neural Suite** — 300+ source-available tools organized across 12 domains under the JTF MERIDIAN command structure. See the [suite on GitHub](https://github.com/cognis-digital) and [jtf-meridian](https://github.com/cognis-digital/jtf-meridian) for how the pieces fit together.
+<!-- cognis:domains:end -->
+
 ## Install / run
 
 ```bash
