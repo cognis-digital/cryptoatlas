@@ -34,3 +34,6 @@ cryptoatlas = "cryptoatlas.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["cryptoatlas"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
