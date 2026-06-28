@@ -1,0 +1,8 @@
+$ cryptoatlas-emit stats
+
+cryptoatlas stats — 0 records (0 with address, 0 entity-level)
+============================================================
+by entity_type:
+by label_source:
+by chain:
+synthetic rows: 0 (policy: must be 0)

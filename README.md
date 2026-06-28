@@ -11,6 +11,102 @@ MCP server.
 
 ---
 
+
+<!-- cognis:example:start -->
+## 🔎 Example output
+
+Real, reproducible output from the tool — runs offline:
+
+```console
+$ cryptoatlas-emit --version
+cryptoatlas 0.1.0
+```
+
+```console
+$ cryptoatlas-emit --help
+usage: cryptoatlas [-h] [--version] [--db DB]
+                   {build,stats,query,export,verify,sources,mcp} ...
+
+Open, enriched dataset of PUBLIC crypto entities and their addresses
+(exchanges, funds, ETFs, treasuries, governments, seizures, reserves, labeled
+whales). Entity-level public data only — no private-individual PII.
+
+positional arguments:
+  {build,stats,query,export,verify,sources,mcp}
+    build               Run the ingestion/enrichment pipeline.
+    stats               Show counts by entity type / source / chain.
+    query               Query by entity name or address.
+    export              Export the dataset (json, csv, or graphml).
+    verify              Verify every record has a valid http(s) source and a
+                        well-formed address.
+    sources             List the public source catalog.
+    mcp                 Run as an MCP server (stdio JSON-RPC).
+
+options:
+  -h, --help            show this help message and exit
+  --version             show program's version number and exit
+  --db DB               SQLite database path.
+```
+
+```console
+$ cryptoatlas-emit stats
+cryptoatlas stats — 0 records (0 with address, 0 entity-level)
+============================================================
+by entity_type:
+by label_source:
+by chain:
+synthetic rows: 0 (policy: must be 0)
+```
+
+```console
+$ cryptoatlas-emit sources
+cryptoatlas public source catalog — 23 sources
+============================================================
+[sanctioned] ofac_sdn_crypto
+    OFAC SDN crypto digital-currency addresses
+    https://www.treasury.gov/ofac/downloads/sdn.xml
+    U.S. Treasury OFAC SDN list. 'Digital Currency Address' IDs are extracted. Public, machine-readable, authoritative.
+[sanctioned] ofac_sdn_advanced_json
+    OFAC SDN advanced JSON feed
+    https://www.treasury.gov/ofac/downloads/sanctions/1.0/sdn_advanced.xml
+    Structured OFAC feed with feature-type crypto addresses.
+[treasury] gov_btc_treasuries
+    Government & public-company BTC holdings (disclosed)
+    https://bitcointreasuries.net/
+    Public-company / government BTC treasury disclosures. Entity-level totals from filings; addresses where publicly attributed.
+[seizure] us_marshals_seizures
+    US Marshals / DOJ crypto seizure disclosures
+    https://www.justice.gov/usao/pressreleases
+    DOJ/USMS press releases disclosing seized wallet addresses.
+[etf] spot_etf_custody
+    Spot BTC/ETH ETF custody disclosures
+    https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany
+    SEC EDGAR filings for spot ETFs; custodian-attributed addresses where disclosed by the trust.
+[exchange] exchange_cold_wallets
+    Exchange cold-wallet labels (public attestations)
+    https://github.com/etherscan-labels/etherscan-labels
+    Community/proof-of-reserves attested exchange labels. Public address-to-entity mapping, no PII.
+[whale] rich_list_snapshot
+    Public rich-list snapshots (labeled clusters only)
+    https://bitinfocharts.com/top-100-richest-bitcoin-addresses.html
+    Only addresses that carry a PUBLIC entity label are ingested. Unlabeled private addresses are intentionally skipped (no deanon).
+[reserve] strategic_reserve
+    National strategic crypto-reserve disclosures
+    https://www.whitehouse.gov/presidential-actions/
+    Government strategic-reserve announcements and disclosed holdings.
+[sanctioned] ofac_sdn_mirror
+    OFAC SDN sanctioned digital-currency addresses (per-chain mirror)
+    https://github.com/0xB10C/ofac-sanctioned-digital-currency-addresses
+    Public per-chain extraction of every OFAC SDN 'Digital Currency Address' (ARB/BCH/BSC/DASH/ETC/ETH/LTC/SOL/TRX/USDC/USDT/XBT/XMR/XRP/XVG/ZEC). Authoritative SDN content, machine-readable.
+[service] etherscan_labels
+    Etherscan public address labels (combined)
+    h
+```
+
+> Blocks above are real `cryptoatlas` output — reproduce them from a clone.
+
+<!-- cognis:example:end -->
+
 ## Usage — step by step
 
 1. **Install** from source (Python 3.9+; SQLite-backed):

@@ -1,0 +1,24 @@
+$ cryptoatlas-emit --help
+
+usage: cryptoatlas [-h] [--version] [--db DB]
+                   {build,stats,query,export,verify,sources,mcp} ...
+
+Open, enriched dataset of PUBLIC crypto entities and their addresses
+(exchanges, funds, ETFs, treasuries, governments, seizures, reserves, labeled
+whales). Entity-level public data only — no private-individual PII.
+
+positional arguments:
+  {build,stats,query,export,verify,sources,mcp}
+    build               Run the ingestion/enrichment pipeline.
+    stats               Show counts by entity type / source / chain.
+    query               Query by entity name or address.
+    export              Export the dataset (json, csv, or graphml).
+    verify              Verify every record has a valid http(s) source and a
+                        well-formed address.
+    sources             List the public source catalog.
+    mcp                 Run as an MCP server (stdio JSON-RPC).
+
+options:
+  -h, --help            show this help message and exit
+  --version             show program's version number and exit
+  --db DB               SQLite database path.
